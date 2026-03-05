@@ -1,0 +1,3 @@
+SELECT *
+FROM EXE_ASSM_GRP_I
+WHERE ASSM_GRP_ID = :assm_grp_id

@@ -1,0 +1,4 @@
+SELECT *
+FROM II_RENW_PREM
+WHERE INFRC_SEQ = :infrc_seq
+  AND INFRC_IDNO BETWEEN :idno_start AND :idno_end

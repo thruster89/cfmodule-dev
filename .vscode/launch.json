@@ -1,0 +1,59 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CF Module - 전체 (샘플)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cf_module.main",
+            "args": ["--sample", "10"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        },
+        {
+            "name": "CF Module - IFRS17만",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cf_module.main",
+            "args": ["--target", "ifrs17", "--sample", "10"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        },
+        {
+            "name": "CF Module - K-ICS만 (연별)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cf_module.main",
+            "args": ["--target", "kics", "--time-step", "yearly", "--sample", "10"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        },
+        {
+            "name": "CF Module - Pricing만",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cf_module.main",
+            "args": ["--target", "pricing", "--sample", "10"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        },
+        {
+            "name": "단건 테스트 (INFRC_IDNO=8833)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_single_contract.py",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "stopOnEntry": false
+        },
+        {
+            "name": "CF Module - Debug 모드 (단건)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cf_module.main",
+            "args": ["--debug"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false
+        }
+    ]
+}

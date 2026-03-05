@@ -1,0 +1,2 @@
+SELECT *
+FROM IA_R_TRD

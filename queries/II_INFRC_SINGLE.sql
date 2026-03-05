@@ -1,0 +1,4 @@
+SELECT *
+FROM II_INFRC
+WHERE INFRC_SEQ = :infrc_seq
+  AND INFRC_IDNO = :infrc_idno

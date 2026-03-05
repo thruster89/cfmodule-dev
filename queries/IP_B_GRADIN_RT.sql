@@ -1,0 +1,8 @@
+SELECT *
+FROM IP_B_GRADIN_RT
+WHERE (PROD_CD, CLS_CD, COV_CD) IN (
+    SELECT PROD_CD, CLS_CD, COV_CD
+    FROM II_INFRC
+    WHERE INFRC_SEQ = :infrc_seq
+      AND INFRC_IDNO BETWEEN :idno_start AND :idno_end
+)

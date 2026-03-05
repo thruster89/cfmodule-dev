@@ -1,0 +1,4 @@
+SELECT *
+FROM IA_M_ETC_ASSM_KEY
+WHERE ASSM_KDCD = :assm_kdcd
+  AND ASSM_FILE_ID = :assm_file_id

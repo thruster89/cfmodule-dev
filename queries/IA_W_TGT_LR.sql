@@ -1,0 +1,2 @@
+SELECT *
+FROM IA_W_TGT_LR

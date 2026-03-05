@@ -1,0 +1,3 @@
+SELECT *
+FROM EXE_SETUP_I
+WHERE EXE_SETUP_ID = :exe_setup_id

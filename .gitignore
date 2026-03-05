@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+output/
+*.db
+*.vdb
+*.duckdb
+*.duckdb.wal
+.env
+.claude/
+*.csv
+*.png
+duckdb_trans.py

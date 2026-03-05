@@ -1,0 +1,2 @@
+SELECT *
+FROM IA_T_SKEW
