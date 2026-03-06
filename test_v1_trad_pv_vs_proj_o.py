@@ -41,7 +41,8 @@ def load_contract_info(conn: sqlite3.Connection, idno: int) -> dict:
                INSTRM_YYCNT, PAYPR_YYCNT, PASS_YYCNT, PASS_MMCNT,
                GRNTPT_GPREM, GRNTPT_JOIN_AMT,
                TOT_TRMNAT_DDCT_AMT, STD_TRMNAT_DDCT_AMT,
-               PAYPR_DVCD, ETC_EXPCT_BIZEXP_KEY_VAL, CLS_CD
+               PAYPR_DVCD, ETC_EXPCT_BIZEXP_KEY_VAL, CLS_CD,
+               PAY_STCD, PREM_DC_RT1
         FROM II_INFRC WHERE INFRC_IDNO = ? AND INFRC_SEQ = 1
     """, [idno]).fetchone()
     if not row:
@@ -53,6 +54,8 @@ def load_contract_info(conn: sqlite3.Connection, idno: int) -> dict:
         "gprem": row[8], "join_amt": row[9],
         "tot_trmnat_ddct": row[10], "std_trmnat_ddct": row[11],
         "paypr_dvcd": row[12], "etc_bizexp_key": row[13], "cls_cd": row[14],
+        "pay_stcd": row[15],  # 1=납입중, 2=납입완료, 3=납입면제
+        "prem_dc_rt": row[16] or 0,  # 보험료 할인율
     }
 
 
@@ -154,9 +157,16 @@ def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
     apply_deduction = (prod_cd in SOFF_DEDUCT_PRODS) and (info["pterm_yy"] > 5)
 
     ctr_mm = np.arange(n_steps) + elapsed  # CTR_AFT_PASS_MMCNT
-    prem_pay_yn = (ctr_mm <= pterm_mm).astype(np.float64)
+    pay_stcd = info.get("pay_stcd", 1)
+    if pay_stcd != 1:
+        # PAY_STCD=2(납입완료) or 3(납입면제): 전 구간 납입 없음
+        prem_pay_yn = np.zeros(n_steps, dtype=np.float64)
+    else:
+        prem_pay_yn = (ctr_mm <= pterm_mm).astype(np.float64)
     orig_prem = np.full(n_steps, gprem, dtype=np.float64)
-    dc_prem = orig_prem.copy()  # Phase 1: 할인 없음 가정
+    dc_rt = info.get("prem_dc_rt", 0)
+    dc_val = int(gprem * (1 - dc_rt) + 0.5)  # round-half-up
+    dc_prem = np.full(n_steps, dc_val, dtype=np.float64)
     acum_nprem = np.full(n_steps, bas["nprem"] * mult, dtype=np.float64)
     # PAD_PREM: 초기값 = GPREM × CTR_MM[0], 이후 PREM_PAY_YN=1일 때 GPREM 누적
     pad_prem = np.empty(n_steps, dtype=np.float64)
