@@ -128,13 +128,17 @@ def load_rsvamt_tmrfnd(conn: sqlite3.Connection, idno: int) -> dict:
     return data
 
 
+# SOFF 차감 적용 상품 목록 (PTERM > 5yr 조건과 함께 사용)
+SOFF_DEDUCT_PRODS = {"LA0211Z", "LA0215R", "LA0215X", "LA0216R", "LA0216W", "LA0217W"}
+
+
 def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
     """Phase 1 TRAD_PV 필드 계산.
 
-    SOFF_BF_TMRFND 유형:
-      A (TP2=4, TP3=1): 정수월 보간 그대로
-      B (TP2=1, TP3=2, TMRFND 없음): 초기 보험연도 ACQSEXP 차감
-      C (TMRFND 데이터 있음): SOFF=0 (납입기간 동안)
+    SOFF_BF_TMRFND 규칙:
+      - PROD ∈ SOFF_DEDUCT_PRODS AND PTERM > 5yr: 초기연도 ACQSEXP 차감
+      - LA0217Y: Type C (별도 처리, 현재 미구현)
+      - 그 외: SOFF = APLY_PREM_ACUMAMT_BNFT
 
     Returns dict of arrays indexed by SETL (0-based).
     """
@@ -146,6 +150,8 @@ def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
     bterm_mm = info["bterm_yy"] * 12
 
     acqsexp1_val = info.get("acqsexp1", 0) or 0
+    prod_cd = info.get("prod_cd", "")
+    apply_deduction = (prod_cd in SOFF_DEDUCT_PRODS) and (info["pterm_yy"] > 5)
 
     # 초기 보험연도 (SETL=0 기준)
     initial_ins_year = (elapsed - 1) // 12 + 1 if elapsed > 0 else 1
@@ -188,10 +194,13 @@ def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
         interp = ystr_v + (yyend_v - ystr_v) * month_in_year / 12
         aply_prem_acumamt_bnft[t] = interp
 
-        # SOFF = 정수월 보간 (기본값)
-        # Note: 일부 상품은 초기연도 ACQSEXP 차감 또는 SOFF=0 등
-        # 복잡한 상품별 분기가 있으나, Phase 1에서는 보간 기본값 사용
-        soff_bf_tmrfnd[t] = interp
+        if apply_deduction and ins_year == initial_ins_year:
+            year_end_cm = ins_year * 12
+            remaining = year_end_cm - cm
+            deduction = acqsexp1_val * remaining / (ins_year * 12)
+            soff_bf_tmrfnd[t] = interp - deduction
+        else:
+            soff_bf_tmrfnd[t] = interp
 
     return {
         "CTR_AFT_PASS_MMCNT": ctr_mm.astype(np.float64),
