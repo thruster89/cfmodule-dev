@@ -153,9 +153,6 @@ def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
     prod_cd = info.get("prod_cd", "")
     apply_deduction = (prod_cd in SOFF_DEDUCT_PRODS) and (info["pterm_yy"] > 5)
 
-    # 초기 보험연도 (SETL=0 기준)
-    initial_ins_year = (elapsed - 1) // 12 + 1 if elapsed > 0 else 1
-
     ctr_mm = np.arange(n_steps) + elapsed  # CTR_AFT_PASS_MMCNT
     prem_pay_yn = (ctr_mm <= pterm_mm).astype(np.float64)
     orig_prem = np.full(n_steps, gprem, dtype=np.float64)
@@ -194,10 +191,10 @@ def compute_trad_pv(info: dict, bas: dict, n_steps: int) -> dict:
         interp = ystr_v + (yyend_v - ystr_v) * month_in_year / 12
         aply_prem_acumamt_bnft[t] = interp
 
-        if apply_deduction and ins_year == initial_ins_year:
-            year_end_cm = ins_year * 12
-            remaining = year_end_cm - cm
-            deduction = acqsexp1_val * remaining / (ins_year * 12)
+        if apply_deduction:
+            # 7년(84개월) 정액상각: deduction = ACQSEXP × max(84 - CM, 0) / 84
+            remaining_84 = max(84 - cm, 0)
+            deduction = acqsexp1_val * remaining_84 / 84
             soff_bf_tmrfnd[t] = interp - deduction
         else:
             soff_bf_tmrfnd[t] = interp
@@ -434,32 +431,53 @@ def main():
                     print(f"  {fname}({fi['max_diff']:.2e}@{fi['setl']})", end="")
             print()
 
+            result["prod_cd"] = info.get("prod_cd", "")
             results.append(result)
 
         except Exception as e:
             fail_count += 1
             elapsed = time.time() - t0
             print(f"  [{i+1:4d}/{len(idnos)}] IDNO={idno:>8d}  ERROR  {elapsed:.1f}s  {str(e)[:60]}")
-            results.append({"idno": int(idno), "pass": False, "items": {}, "error": str(e)})
+            results.append({"idno": int(idno), "pass": False, "items": {}, "error": str(e), "prod_cd": ""})
 
     proj.close()
     legacy.close()
 
     # 요약
+    n_error = sum(1 for r in results if "error" in r)
+    n_valid = len(results) - n_error
+    n_la0217y = sum(1 for r in results if r.get("prod_cd") == "LA0217Y" and "error" not in r)
+    n_excl = n_valid - n_la0217y
+
     print()
     print("=" * 80)
-    print(f"결과: PASS={pass_count}, FAIL={fail_count}, 총={len(idnos)}")
+    print(f"결과: PASS={pass_count}, FAIL={fail_count}, ERROR={n_error}, 총={len(idnos)}")
+    print(f"  (LA0217Y={n_la0217y}건 별도 분리, Phase 2)")
     print("=" * 80)
 
-    # 항목별 통계
-    if results:
-        print(f"\n{'항목':<25} {'PASS':>6} {'FAIL':>6} {'Max Diff':>12}")
-        print("-" * 55)
+    # 항목별 통계 (LA0217Y 제외)
+    valid_excl = [r for r in results if r.get("items") and r.get("prod_cd") != "LA0217Y"]
+    valid_la0217y = [r for r in results if r.get("items") and r.get("prod_cd") == "LA0217Y"]
+
+    if valid_excl:
+        print(f"\n[LA0217Y 제외] {len(valid_excl)}건:")
+        print(f"  {'항목':<25} {'PASS':>6} {'FAIL':>6} {'Max Diff':>12}")
+        print("  " + "-" * 53)
         for name in COMPARE_ITEMS:
-            item_pass = sum(1 for r in results if name in r.get("items", {}) and r["items"][name]["pass"])
-            item_fail = sum(1 for r in results if name in r.get("items", {}) and not r["items"][name]["pass"])
-            max_d = max((r["items"][name]["max_diff"] for r in results if name in r.get("items", {})), default=0)
-            print(f"  {name:<23} {item_pass:>6} {item_fail:>6} {max_d:>12.2e}")
+            item_pass = sum(1 for r in valid_excl if name in r["items"] and r["items"][name]["pass"])
+            item_fail = sum(1 for r in valid_excl if name in r["items"] and not r["items"][name]["pass"])
+            max_d = max((r["items"][name]["max_diff"] for r in valid_excl if name in r["items"]), default=0)
+            print(f"  {name:<25} {item_pass:>6} {item_fail:>6} {max_d:>12.2e}")
+
+    if valid_la0217y:
+        print(f"\n[LA0217Y만] {len(valid_la0217y)}건:")
+        print(f"  {'항목':<25} {'PASS':>6} {'FAIL':>6} {'Max Diff':>12}")
+        print("  " + "-" * 53)
+        for name in COMPARE_ITEMS:
+            item_pass = sum(1 for r in valid_la0217y if name in r["items"] and r["items"][name]["pass"])
+            item_fail = sum(1 for r in valid_la0217y if name in r["items"] and not r["items"][name]["pass"])
+            max_d = max((r["items"][name]["max_diff"] for r in valid_la0217y if name in r["items"]), default=0)
+            print(f"  {name:<25} {item_pass:>6} {item_fail:>6} {max_d:>12.2e}")
 
     # FAIL CSV
     if fail_details and args.csv:
