@@ -191,7 +191,7 @@ class TradPVResult:
 
 
 # ---------------------------------------------------------------------------
-# STEP 3: 보험료 산출
+# STEP 1: 보험료 산출
 # ---------------------------------------------------------------------------
 
 def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
@@ -271,12 +271,14 @@ def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# STEP 4-5: 급부/사업비 → 적립금 (ACUM)
+# STEP 4: 적립금 (ACUM)
 # ---------------------------------------------------------------------------
 
 def _calc_accumulation(info: ContractInfo, n_steps: int,
                        ctr_mm: np.ndarray, prem_pay_yn: np.ndarray,
                        nprem_val: float,
+                       pubano_inrt: np.ndarray,
+                       lwst_grnt_inrt: np.ndarray,
                        pay_trmo: Optional[np.ndarray] = None,
                        ctr_trmo: Optional[np.ndarray] = None) -> dict:
     """적립금(APLY_PREM_ACUMAMT_BNFT) 산출.
@@ -284,7 +286,8 @@ def _calc_accumulation(info: ContractInfo, n_steps: int,
     BAS 보유: 연시/연말 선형보간
     BAS 미보유: 이율 기반 부리 (PAY_TRMO/CTR_TRMO 비율 보정)
 
-    Returns dict with: ystr_rsvamt, yyend_rsvamt, aply_prem_acumamt_bnft, nobas_extra
+    Returns dict with: ystr_rsvamt, yyend_rsvamt, aply_prem_acumamt_bnft,
+                       aply_adint_tgt_amt, lwst_adint_tgt_amt, lwst_prem_acumamt
     """
     has_bas = info.bas is not None
     mult = (info.join_amt / info.bas["crit_join_amt"]
@@ -294,36 +297,34 @@ def _calc_accumulation(info: ContractInfo, n_steps: int,
     yyend_rsvamt = np.zeros(n_steps, dtype=np.float64)
     aply_prem_acumamt_bnft = np.zeros(n_steps, dtype=np.float64)
 
-    # BAS 미보유: 이율 기반 ACUM (pubano_inrt_arr 필요)
+    zeros = np.zeros(n_steps, dtype=np.float64)
+    aply_adint_tgt_amt = zeros.copy()
+    lwst_adint_tgt_amt = zeros.copy()
+    lwst_prem_acumamt = zeros.copy()
+
+    # BAS 미보유: 이율 기반 ACUM
     acum_nobas = None
-    nobas_extra = None
     if not has_bas and info.acum_cov and info.accmpt_rspb_rsvamt:
         elapsed = info.pass_yy * 12 + info.pass_mm
         pterm_mm = info.pterm_yy * 12
 
-        # PUBANO_INRT / LWST_GRNT_INRT 배열 사전 산출
-        lwst_arr = _build_lwst_grnt_inrt_arr(info, n_steps)
-        pubano_arr = _build_pubano_inrt_arr(info, n_steps)
         # LWST=0인 시점은 최저보증 없음 → PUBANO 그대로 사용
-        lwst_for_acum = np.where(lwst_arr > 0, lwst_arr, pubano_arr)
+        lwst_for_acum = np.where(lwst_grnt_inrt > 0, lwst_grnt_inrt, pubano_inrt)
 
         acum_nobas, lwst_acum, adint_aply, adint_lwst = _compute_acum_interest_based(
             info.accmpt_rspb_rsvamt, nprem_val,
             lwst_for_acum, n_steps,
             elapsed, pterm_mm, info.pay_stcd,
-            pubano_inrt_arr=pubano_arr,
+            pubano_inrt_arr=pubano_inrt,
             pay_trmo=pay_trmo,
             ctr_trmo=ctr_trmo,
             nprem_old=info.acum_nprem_old,
             amort_mm=info.amort_mm,
             prem_pay_yn=prem_pay_yn,
         )
-        nobas_extra = {
-            "adint_aply": adint_aply,
-            "adint_lwst": adint_lwst,
-            "lwst_acum": lwst_acum,
-            "pubano_arr": pubano_arr,
-        }
+        aply_adint_tgt_amt = adint_aply
+        lwst_adint_tgt_amt = adint_lwst
+        lwst_prem_acumamt = lwst_acum
 
     for t in range(n_steps):
         cm = int(ctr_mm[t])
@@ -350,7 +351,9 @@ def _calc_accumulation(info: ContractInfo, n_steps: int,
         "ystr_rsvamt": ystr_rsvamt,
         "yyend_rsvamt": yyend_rsvamt,
         "aply_prem_acumamt_bnft": aply_prem_acumamt_bnft,
-        "nobas_extra": nobas_extra,
+        "aply_adint_tgt_amt": aply_adint_tgt_amt,
+        "lwst_adint_tgt_amt": lwst_adint_tgt_amt,
+        "lwst_prem_acumamt": lwst_prem_acumamt,
     }
 
 
@@ -437,7 +440,7 @@ def _build_pubano_inrt_arr(info: ContractInfo, n_steps: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# STEP 5b: 미경과보험료 (PRPD)
+# STEP 2: 미경과보험료 (PRPD) — KICS 산출에 선행
 # ---------------------------------------------------------------------------
 
 def _calc_prpd_mmcnt(info: ContractInfo, n_steps: int,
@@ -476,7 +479,7 @@ def _calc_prpd_acum(info: ContractInfo, n_steps: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# STEP 6: 환급금 (SOFF / LTRMNAT)
+# STEP 5: 환급금 (SOFF / LTRMNAT)
 # ---------------------------------------------------------------------------
 
 def _calc_surrender(info: ContractInfo, n_steps: int,
@@ -540,56 +543,10 @@ def _calc_surrender(info: ContractInfo, n_steps: int,
 
 
 # ---------------------------------------------------------------------------
-# STEP 7: 이율 / 할인 (Phase 2 — 미구현)
-# ---------------------------------------------------------------------------
-
-def _calc_interest(info: ContractInfo, n_steps: int,
-                   ctr_mm: np.ndarray,
-                   nobas_extra: Optional[dict] = None) -> dict:
-    """이율 관련 필드 산출.
-
-    APLY_PUBANO_INRT: IP_P_ACUM_COV 대상만 DB 공식 기반 계산.
-      공식: (EXT_WGHT*EXT_ITR + (DC_RT-IV_ADEXP_RT)*(1-EXT_WGHT)) * ADJ_RT
-      SETL=0: inrt_lookup.json 캐시 (현재 적용 이율)
-      SETL>=1: IE_PUBANO_INRT × IE_DC_RT 공식
-    IP_P_ACUM_COV 미대상: 0 (계산 스킵)
-    """
-    zeros = np.zeros(n_steps, dtype=np.float64)
-
-    # APLY_PUBANO_INRT: NoBAS에서 이미 산출된 배열 재활용, 아니면 새로 산출
-    if nobas_extra and "pubano_arr" in nobas_extra:
-        aply_pubano_inrt = nobas_extra["pubano_arr"]
-    else:
-        aply_pubano_inrt = _build_pubano_inrt_arr(info, n_steps)
-
-    # NoBAS: ADINT / LWST
-    if nobas_extra:
-        aply_adint_tgt_amt = nobas_extra["adint_aply"]
-        lwst_adint_tgt_amt = nobas_extra["adint_lwst"]
-        lwst_prem_acumamt = nobas_extra["lwst_acum"]
-    else:
-        aply_adint_tgt_amt = zeros.copy()
-        lwst_adint_tgt_amt = zeros.copy()
-        lwst_prem_acumamt = zeros.copy()
-
-    # KICS: compute_trad_pv에서 SOFF_AF × CTR_TRME로 산출
-    cncttp_acumamt_kics = zeros.copy()  # placeholder
-
-    return {
-        "aply_pubano_inrt": aply_pubano_inrt,
-        "aply_adint_tgt_amt": aply_adint_tgt_amt,
-        "lwst_adint_tgt_amt": lwst_adint_tgt_amt,
-        "lwst_prem_acumamt": lwst_prem_acumamt,
-        "cncttp_acumamt_kics": cncttp_acumamt_kics,
-    }
-
-
-# ---------------------------------------------------------------------------
-# STEP 7b: 약관대출 (LOAN)
+# STEP 7: 약관대출 (LOAN)
 # ---------------------------------------------------------------------------
 
 def _calc_loan(info: ContractInfo, n_steps: int,
-               cncttp_acumamt_kics: np.ndarray,
                aply_pubano_inrt: np.ndarray) -> dict:
     """약관대출 관련 필드 산출.
 
@@ -621,11 +578,9 @@ def _calc_loan(info: ContractInfo, n_steps: int,
 
 
 # ---------------------------------------------------------------------------
-# STEP 8: PV (Phase 3 — 미구현)
+# STEP 3: 이율 배열 (PUBANO_INRT / LWST_GRNT_INRT)
+# → _build_pubano_inrt_arr, _build_lwst_grnt_inrt_arr 는 상단에 정의
 # ---------------------------------------------------------------------------
-
-# PV 단계는 MN tpx, BN 급부금, 할인율과 결합하여 산출.
-# 현재는 개별 CF 항목만 산출하며, PV 합산은 상위 모듈에서 수행.
 
 
 # ---------------------------------------------------------------------------
@@ -638,83 +593,93 @@ def compute_trad_pv(info: ContractInfo, n_steps: int,
                     ctr_trme: Optional[np.ndarray] = None) -> TradPVResult:
     """단건 OD_TRAD_PV 전체 산출.
 
+    계산 흐름 (의존성 순서):
+      STEP 1: 보험료 (시간축, 납입여부, 원수/할인/적립보험료)
+      STEP 2: 미경과보험료 PRPD (KICS 산출에 선행)
+      STEP 3: 이율 배열 (적립금 부리에 선행)
+      STEP 4: 적립금 (BAS 보간 / NoBAS 이율부리)
+      STEP 5: 환급금 (SOFF_BF, SOFF_AF, LTRMNAT)
+      STEP 6: KICS = (SOFF_AF + PRPD_PREM) × CTR_TRME
+      STEP 7: 약관대출
+
     Args:
         info: 계약 정보 (ContractInfo)
         n_steps: 프로젝션 시점 수
         pay_trmo: PAY_TRMO_MTNPSN_CNT 배열 (NoBAS ADINT 비율 보정용)
         ctr_trmo: CTR_TRMO_MTNPSN_CNT 배열
         ctr_trme: CTR_TRME_MTNPSN_CNT 배열 (KICS 산출용)
-
-    Returns:
-        TradPVResult
     """
     zeros = np.zeros(n_steps, dtype=np.float64)
 
-    # STEP 3: 보험료
+    # STEP 1: 보험료
     prem = _calc_premium(info, n_steps)
+    ctr_mm = prem["ctr_mm"]
+    prem_pay_yn = prem["prem_pay_yn"]
 
-    # STEP 4-5: 적립금
+    # STEP 2: 미경과보험료 (PRPD) — KICS에 선행
+    prpd_mmcnt = _calc_prpd_mmcnt(info, n_steps, ctr_mm, prem_pay_yn)
+    prpd_prem = _calc_prpd_prem(info, n_steps, ctr_mm, prem_pay_yn, prem["orig_prem"])
+    acum_nprem_prpd = _calc_prpd_acum(info, n_steps)
+
+    # STEP 3: 이율 배열 — 적립금 부리에 선행
+    pubano_inrt = _build_pubano_inrt_arr(info, n_steps)
+    lwst_grnt_inrt = _build_lwst_grnt_inrt_arr(info, n_steps)
+
+    # STEP 4: 적립금
     acum = _calc_accumulation(
-        info, n_steps,
-        prem["ctr_mm"], prem["prem_pay_yn"], prem["nprem_val"],
+        info, n_steps, ctr_mm, prem_pay_yn, prem["nprem_val"],
+        pubano_inrt=pubano_inrt, lwst_grnt_inrt=lwst_grnt_inrt,
         pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
     )
 
-    # STEP 6: 환급금
-    surr = _calc_surrender(
-        info, n_steps,
-        prem["ctr_mm"], prem["prem_pay_yn"],
-        acum["aply_prem_acumamt_bnft"],
-    )
+    # STEP 5: 환급금
+    surr = _calc_surrender(info, n_steps, ctr_mm, prem_pay_yn,
+                           acum["aply_prem_acumamt_bnft"])
 
-    # STEP 7: 이율
-    inrt = _calc_interest(info, n_steps, prem["ctr_mm"],
-                          nobas_extra=acum.get("nobas_extra"))
-
-    # KICS = (SOFF_AF_TMRFND + PRPD_PREM) × CTR_TRME
-    prpd_prem = _calc_prpd_prem(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"], prem["orig_prem"])
+    # STEP 6: KICS = (SOFF_AF + PRPD_PREM) × CTR_TRME
     if ctr_trme is not None:
         cncttp_kics = (surr["soff_af_tmrfnd"] + prpd_prem) * ctr_trme[:n_steps]
     else:
-        cncttp_kics = inrt["cncttp_acumamt_kics"]
+        cncttp_kics = zeros.copy()
 
-    # LOAN
-    loan = _calc_loan(info, n_steps, cncttp_kics, inrt["aply_pubano_inrt"])
+    # STEP 7: 약관대출
+    loan = _calc_loan(info, n_steps, pubano_inrt)
 
     return TradPVResult(
         n_steps=n_steps,
-        # 보험료
-        ctr_mm=prem["ctr_mm"],
-        prem_pay_yn=prem["prem_pay_yn"],
+        # STEP 1: 보험료
+        ctr_mm=ctr_mm,
+        prem_pay_yn=prem_pay_yn,
         orig_prem=prem["orig_prem"],
         dc_prem=prem["dc_prem"],
         acum_nprem=prem["acum_nprem"],
         pad_prem=prem["pad_prem"],
         acqsexp1_bizexp=prem["acqsexp1_bizexp"],
-        # 준비금
+        # STEP 2: 미경과보험료
+        acum_nprem_prpd=acum_nprem_prpd,
+        prpd_mmcnt=prpd_mmcnt,
+        prpd_prem=prpd_prem,
+        # STEP 3: 이율
+        aply_pubano_inrt=pubano_inrt,
+        # STEP 4: 적립금
         ystr_rsvamt=acum["ystr_rsvamt"],
         yyend_rsvamt=acum["yyend_rsvamt"],
-        # 적립금
         aply_prem_acumamt_bnft=acum["aply_prem_acumamt_bnft"],
         aply_prem_acumamt_exp=acum["aply_prem_acumamt_bnft"].copy(),
-        # 환급금
+        aply_adint_tgt_amt=acum["aply_adint_tgt_amt"],
+        lwst_adint_tgt_amt=acum["lwst_adint_tgt_amt"],
+        lwst_prem_acumamt=acum["lwst_prem_acumamt"],
+        # STEP 5: 환급금
         soff_bf_tmrfnd=surr["soff_bf_tmrfnd"],
         soff_af_tmrfnd=surr["soff_af_tmrfnd"],
         ltrmnat_tmrfnd=surr["ltrmnat_tmrfnd"],
-        # 이율
-        aply_pubano_inrt=inrt["aply_pubano_inrt"],
-        aply_adint_tgt_amt=inrt["aply_adint_tgt_amt"],
-        lwst_adint_tgt_amt=inrt["lwst_adint_tgt_amt"],
-        lwst_prem_acumamt=inrt["lwst_prem_acumamt"],
+        # STEP 6: KICS
         cncttp_acumamt_kics=cncttp_kics,
-        # 약관대출
+        # STEP 7: 약관대출
         loan_int=loan["loan_int"],
         loan_remamt=loan["loan_remamt"],
         loan_rpay_hafway=loan["loan_rpay_hafway"],
-        # PRPD (미경과보험료)
-        acum_nprem_prpd=_calc_prpd_acum(info, n_steps),
-        prpd_mmcnt=_calc_prpd_mmcnt(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"]),
-        prpd_prem=_calc_prpd_prem(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"], prem["orig_prem"]),
+        # 0-컬럼 (미구현)
         add_accmpt_gprem=zeros.copy(),
         add_accmpt_nprem=zeros.copy(),
         acqsexp2_bizexp=zeros.copy(),
@@ -735,7 +700,7 @@ def compute_trad_pv(info: ContractInfo, n_steps: int,
 
 
 # ---------------------------------------------------------------------------
-# 이율 기반 부리 (BAS 미보유 계약용)
+# STEP 4 내부: 이율 기반 부리 (BAS 미보유 계약용)
 # ---------------------------------------------------------------------------
 
 def _compute_acum_interest_based(
