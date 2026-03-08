@@ -183,8 +183,19 @@ VSOLN2.vdb (Legacy SQLite)
 - [x] v2 실제 DB 검증 (t=1): test_v2_real.py — PROJ_O2.vdb 기대값 전항목 PASS (diff < 1e-10)
 - [x] v2 OD_TBL_MN 전체 비교: test_v2_vs_proj_o2.py — **344개월 × 12항목 전부 PASS (diff < 1e-15)**
 
+### 완료 (OD_TBL_BN)
+
+- [x] BN Phase 1 검증: 32,962건 × 72,797 BNFT, 15/16 컬럼 ALL PASS
+- [x] bn_loader.py: 6개 참조테이블 로드 (BNFT_RSKRT_C, BNFT_BAS, DEFRY_RT, NCOV, INVLD_TRMNAT, PRTT_BNFT_RT)
+- [x] tbl_bn.py: Per-BNFT 독립 exit rate → tpx → TRME/TRMO → 탈퇴자/발생건 → PYAMT/BNFT_INSUAMT
+- [x] test_tbl_bn.py: Phase 1 검증 (rate 컬럼을 기대값에서 읽고 파생 컬럼 검증)
+- [x] t=0 규칙: TRMO[0]=1, TRME[0]=1, 모든 count=0 (MN과 다른 BN 전용 초기화)
+- [x] PYAMT: PRTT≠0 → CRIT×PRTT, else CRIT×DEFRY (263건 float precision 1.49e-6 이내)
+
 ### 미구현 (다음 작업)
 
+- [ ] **BN Phase 2**: Per-BNFT 독립 중복제거 엔진 (driver 기반 가정 매칭)
+- [ ] **BN Phase 2**: DEFRY_RT/PRTT_RT/GRADIN_RT 자체 산출
 - [ ] **v2 오케스트레이터**: 대량 계약 청크 처리 + 병렬화
 - [ ] **Premium/Benefit/Expense/Reserve/Discount/PV 단계**: projector.py 8단계 중 3~8단계
 
