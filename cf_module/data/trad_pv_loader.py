@@ -1,19 +1,24 @@
 """
 OD_TRAD_PV 산출에 필요한 DB 데이터 로딩 모듈.
 
-Legacy SQLite DB (VSOLN.vdb)에서 계약/준비금/사업비 정보를 로드한다.
+DuckDB (duckdb_transform.duckdb) 또는 Legacy SQLite DB에서
+계약/준비금/사업비 정보를 로드한다.
 """
 
 import sqlite3
 import time
-from typing import Optional
+from typing import Optional, Union
 
+import duckdb
 import numpy as np
 
 from cf_module.calc.trad_pv import ContractInfo
 from cf_module.utils.logger import get_logger
 
 logger = get_logger("trad_pv_loader")
+
+# DuckDB / SQLite 공통 타입
+DBConn = Union[duckdb.DuckDBPyConnection, sqlite3.Connection]
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,7 @@ class TradPVDataCache:
         info = build_contract_info_cached(cache, idno)
     """
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: DBConn):
         t0 = time.time()
         self._load_infrc(conn)
         self._load_rsvamt_bas(conn)
@@ -83,20 +88,19 @@ class TradPVDataCache:
     # --- II_RSVAMT_BAS ---
     def _load_rsvamt_bas(self, conn):
         self.rsvamt_bas = {}
-        cols = [c[1] for c in conn.execute("PRAGMA table_info(II_RSVAMT_BAS)").fetchall()]
-        rows = conn.execute("SELECT * FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1").fetchall()
-        idno_idx = cols.index("INFRC_IDNO")
-        crit_idx = cols.index("CRIT_JOIN_AMT")
-        nprem_idx = cols.index("NPREM")
+        ystr_cols = ", ".join(f"YSTR_RSVAMT{yr}" for yr in range(1, 121))
+        yyend_cols = ", ".join(f"YYEND_RSVAMT{yr}" for yr in range(1, 121))
+        sql = (f"SELECT INFRC_IDNO, CRIT_JOIN_AMT, NPREM, "
+               f"{ystr_cols}, {yyend_cols} "
+               f"FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1")
+        rows = conn.execute(sql).fetchall()
         for r in rows:
-            data = dict(zip(cols, r))
-            ystr = np.array([data.get(f"YSTR_RSVAMT{yr}", 0) or 0 for yr in range(1, 121)],
-                            dtype=np.float64)
-            yyend = np.array([data.get(f"YYEND_RSVAMT{yr}", 0) or 0 for yr in range(1, 121)],
-                             dtype=np.float64)
-            self.rsvamt_bas[r[idno_idx]] = {
-                "crit_join_amt": r[crit_idx],
-                "nprem": r[nprem_idx],
+            idno = r[0]
+            ystr = np.array([r[3 + i] or 0 for i in range(120)], dtype=np.float64)
+            yyend = np.array([r[123 + i] or 0 for i in range(120)], dtype=np.float64)
+            self.rsvamt_bas[idno] = {
+                "crit_join_amt": r[1],
+                "nprem": r[2],
                 "ystr": ystr, "yyend": yyend,
             }
 

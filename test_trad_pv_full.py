@@ -1,23 +1,23 @@
 """OD_TRAD_PV 전체 컬럼 × 전 시점 검증 (CLA00500 한정).
 
-TradPVDataCache를 사용하여 SQLite I/O를 최소화.
+DuckDB 단일 DB (duckdb_transform.duckdb) 사용.
 """
-import sqlite3
 import time
 import duckdb
 import numpy as np
 from cf_module.calc.trad_pv import compute_trad_pv
 from cf_module.data.trad_pv_loader import TradPVDataCache, build_contract_info_cached
 
+DB_PATH = 'duckdb_transform.duckdb'
+
 t_start = time.time()
-legacy = sqlite3.connect('VSOLN.vdb')
-proj = duckdb.connect('proj_o.duckdb', read_only=True)
+con = duckdb.connect(DB_PATH, read_only=True)
 
-# 캐시 초기화 (전체 테이블 일괄 로드)
-cache = TradPVDataCache(legacy)
+# 캐시 초기화 (DuckDB에서 일괄 로드)
+cache = TradPVDataCache(con)
 
-# CLA00500 IDNOs (캐시에서 필터링 — DB 쿼리 불필요)
-all_ids = proj.execute(
+# CLA00500 IDNOs (캐시에서 필터링)
+all_ids = con.execute(
     'SELECT DISTINCT INFRC_IDNO FROM OD_TRAD_PV'
 ).fetchdf()['INFRC_IDNO'].tolist()
 
@@ -68,12 +68,12 @@ for i, idno in enumerate(cla500_ids):
         n_err += 1
         continue
 
-    n_steps = proj.execute(
+    n_steps = con.execute(
         f'SELECT COUNT(*) FROM OD_TRAD_PV WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno}'
     ).fetchone()[0]
 
     # OD_TBL_MN에서 PAY_TRMO / CTR_TRMO / CTR_TRME 로드
-    mn = proj.execute(
+    mn = con.execute(
         f'SELECT CTR_TRMO_MTNPSN_CNT, PAY_TRMO_MTNPSN_CNT, CTR_TRME_MTNPSN_CNT '
         f'FROM OD_TBL_MN WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
     ).fetchdf()
@@ -85,7 +85,7 @@ for i, idno in enumerate(cla500_ids):
                              pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
                              ctr_trme=ctr_trme)
     d = result.to_dict()
-    exp = proj.execute(
+    exp = con.execute(
         f'SELECT * FROM OD_TRAD_PV WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
     ).fetchdf()
 
@@ -139,11 +139,4 @@ if fail_cols:
         for ex in col_fail_examples[col]:
             print(f"  {ex}")
 
-# FAIL 원인 분류
-if fail_cols:
-    print(f"\n{'='*70}")
-    print("FAIL 원인 분류")
-    print(f"{'='*70}")
-
-legacy.close()
-proj.close()
+con.close()
