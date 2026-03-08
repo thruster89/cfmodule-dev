@@ -669,9 +669,10 @@ def compute_trad_pv(info: ContractInfo, n_steps: int,
     inrt = _calc_interest(info, n_steps, prem["ctr_mm"],
                           nobas_extra=acum.get("nobas_extra"))
 
-    # KICS = SOFF_AF_TMRFND × CTR_TRME
+    # KICS = (SOFF_AF_TMRFND + PRPD_PREM) × CTR_TRME
+    prpd_prem = _calc_prpd_prem(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"], prem["orig_prem"])
     if ctr_trme is not None:
-        cncttp_kics = surr["soff_af_tmrfnd"] * ctr_trme[:n_steps]
+        cncttp_kics = (surr["soff_af_tmrfnd"] + prpd_prem) * ctr_trme[:n_steps]
     else:
         cncttp_kics = inrt["cncttp_acumamt_kics"]
 
@@ -879,7 +880,7 @@ def apply_soff_af_netting(
                 # 특약: 합산 음수 시점 → AF = max(0, BF)
                 r.soff_af_tmrfnd[mask] = np.maximum(0.0, r.soff_bf_tmrfnd[mask])
 
-            # CNCTTP_ACUMAMT_KICS 재산출
+            # CNCTTP_ACUMAMT_KICS 재산출: (AF + PRPD_PREM) × TRME
             if ctr_trme_map and idno in ctr_trme_map:
                 trme = ctr_trme_map[idno]
-                r.cncttp_acumamt_kics[:] = r.soff_af_tmrfnd * trme[:n]
+                r.cncttp_acumamt_kics[:] = (r.soff_af_tmrfnd + r.prpd_prem) * trme[:n]
