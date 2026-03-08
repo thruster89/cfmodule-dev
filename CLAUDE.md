@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-보험 Cash Flow 프로젝션 엔진. SQLite DB에서 보험상품 가정을 추출하고, 계리 계산(사망률, 해약률, 스큐, 중복제거 위험률)을 수행하여 CF를 산출한다.
+보험 Cash Flow 프로젝션 엔진. `duckdb_transform.duckdb`(75개 raw 테이블)에서 보험상품 가정을 직접 읽어, 계리 계산(사망률, 해약률, 스큐, 중복제거 위험률)을 수행하여 CF를 산출한다.
+
+**핵심 원칙**: v2 ETL(v2/etl.py)을 거치지 않고, input DB(duckdb_transform.duckdb)의 raw 테이블에서 legacy 드라이버 기반 키매칭을 직접 수행하여 PROJ_O2.vdb와 동일한 결과 테이블을 구현한다. v2 Star Schema(fact 테이블)는 사용하지 않음.
 
 ## Key Dependencies
 
@@ -191,6 +193,15 @@ VSOLN2.vdb (Legacy SQLite)
 - [x] test_tbl_bn.py: Phase 1 검증 (rate 컬럼을 기대값에서 읽고 파생 컬럼 검증)
 - [x] t=0 규칙: TRMO[0]=1, TRME[0]=1, 모든 count=0 (MN과 다른 BN 전용 초기화)
 - [x] PYAMT: PRTT≠0 → CRIT×PRTT, else CRIT×DEFRY (263건 float precision 1.49e-6 이내)
+
+### 진행중 (OD_RSK_RT / OD_LAPSE_RT)
+
+- [ ] **OD_RSK_RT / OD_LAPSE_RT 산출 모듈**: duckdb_transform.duckdb raw 테이블에서 드라이버 매칭 → 결과 테이블 산출
+  - `data/rsk_lapse_loader.py`: RawAssumptionLoader (드라이버 키매칭 — v1 assm_key_builder.py 참고)
+  - `calc/tbl_rsk_rt.py`: compute_rsk_rt (위험률 원율 → BEPRD → 월변환 → 면책)
+  - `calc/tbl_lapse_rt.py`: compute_lapse_rt (해지율 → 스큐 적용 → 월변환)
+  - `test_rsk_lapse_rt.py`: PROJ_O2.vdb 기대값 비교 검증
+  - **v2 ETL 미사용** — raw 테이블에서 직접 드라이버 매칭
 
 ### 미구현 (다음 작업)
 
