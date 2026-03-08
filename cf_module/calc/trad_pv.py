@@ -393,6 +393,9 @@ def _build_pubano_inrt_arr(info: ContractInfo, n_steps: int) -> np.ndarray:
     """
     arr = np.zeros(n_steps, dtype=np.float64)
     if not info.acum_cov:
+        # acum_cov 없으면 EXPCT_INRT를 PUBANO로 사용 (CD='00' 취급)
+        if info.expct_inrt_data and info.expct_inrt_data.get("expct_inrt"):
+            arr[:] = info.expct_inrt_data["expct_inrt"]
         return arr
 
     lwst_arr = _build_lwst_grnt_inrt_arr(info, n_steps)

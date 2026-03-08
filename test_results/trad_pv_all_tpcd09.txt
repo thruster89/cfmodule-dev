@@ -1,7 +1,7 @@
 
 ======================================================================
-OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=27,367, ERR=0
-총 소요: 68.3s
+OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,025, ERR=0
+총 소요: 75.3s
 ======================================================================
 
 컬럼                                PASS    FAIL     max_diff
@@ -30,7 +30,7 @@ PENS_INRT                        28211       0       0.0000  PASS
 PENS_DEFRY_RT                    28211       0       0.0000  PASS
 PENS_ANNUAL_SUM                  28211       0       0.0000  PASS
 HAFWAY_WDAMT                     28211       0       0.0000  PASS
-APLY_PUBANO_INRT                 27530     681       0.0375  FAIL
+APLY_PUBANO_INRT                 28211       0       0.0000  PASS
 APLY_ADINT_TGT_AMT               28211       0       0.0000  PASS
 APLY_PREM_ACUMAMT_BNFT           28211       0       0.0000  PASS
 APLY_PREM_ACUMAMT_EXP            28211       0       0.0000  PASS
@@ -43,7 +43,7 @@ HAFWAY_WDAMT_ADD                 28211       0       0.0000  PASS
 SOFF_BF_TMRFND_ADD               28211       0       0.0000  PASS
 SOFF_AF_TMRFND_ADD               28211       0       0.0000  PASS
 CNCTTP_ACUMAMT_KICS              28045     166  356514.5833  FAIL
-LOAN_INT                         28211       0       0.0000  PASS
+LOAN_INT                         28191      20    1451.0298  FAIL
 LOAN_REMAMT                      28191      20 1176700.0000  FAIL
 LOAN_RPAY_HAFWAY                 28191      20 1176700.0000  FAIL
 LOAN_NEW                         28211       0       0.0000  PASS
@@ -53,13 +53,6 @@ MATU_MAINT_BNS_ACUM_AMT          28211       0       0.0000  PASS
 ======================================================================
 FAIL 상세 (컬럼별 최대 5건)
 ======================================================================
-
-APLY_PUBANO_INRT (FAIL=681, max_diff=0.0375):
-  IDNO=637937 t=0 comp=0.0000 exp=0.0300 diff=0.0300
-  IDNO=642572 t=0 comp=0.0000 exp=0.0300 diff=0.0300
-  IDNO=644573 t=0 comp=0.0000 exp=0.0300 diff=0.0300
-  IDNO=45972 t=0 comp=0.0000 exp=0.0370 diff=0.0370
-  IDNO=827362 t=0 comp=0.0000 exp=0.0375 diff=0.0375
 
 SOFF_BF_TMRFND (FAIL=3, max_diff=9111.4286):
   IDNO=1058936 t=0 comp=10659.5000 exp=11450.0000 diff=790.5000
@@ -85,6 +78,13 @@ CNCTTP_ACUMAMT_KICS (FAIL=166, max_diff=356514.5833):
   IDNO=91801 t=0 comp=-672.8333 exp=0.0000 diff=672.8333
   IDNO=102651 t=0 comp=-1431.7857 exp=0.0000 diff=1431.7857
 
+LOAN_INT (FAIL=20, max_diff=1451.0298):
+  IDNO=679789 t=1 comp=320.3241 exp=0.0000 diff=320.3241
+  IDNO=680901 t=1 comp=44.3842 exp=0.0000 diff=44.3842
+  IDNO=681158 t=1 comp=16.0332 exp=0.0000 diff=16.0332
+  IDNO=265478 t=1 comp=765.1158 exp=0.0000 diff=765.1158
+  IDNO=268003 t=1 comp=172.3614 exp=0.0000 diff=172.3614
+
 LOAN_REMAMT (FAIL=20, max_diff=1176700.0000):
   IDNO=679789 t=0 comp=259764.0000 exp=0.0000 diff=259764.0000
   IDNO=680901 t=0 comp=35993.0000 exp=0.0000 diff=35993.0000
@@ -104,47 +104,47 @@ COV_CD별 요약
 ======================================================================
 COV_CD           건수     OK  ERR  FAIL_COLS     시간
 --------------------------------------------------
-CLA00500       9038   9012    0    FAIL(2)  21.9s
-CLA10007       6622   6485    0    FAIL(3)  16.0s
-CLA10011       1499   1415    0    FAIL(1)   2.1s
-CLA10363       1067   1045    0    FAIL(2)   2.4s
-CLA10370       1067   1044    0    FAIL(2)   2.2s
-CLA10217       1067   1043    0    FAIL(2)   2.3s
+CLA00500       9038   9012    0    FAIL(2)  25.5s
+CLA10007       6622   6612    0    FAIL(3)  18.1s
+CLA10011       1499   1499    0         OK   2.0s
+CLA10363       1067   1045    0    FAIL(2)   2.7s
+CLA10370       1067   1044    0    FAIL(2)   2.5s
+CLA10217       1067   1043    0    FAIL(2)   2.7s
 CLA10211       1028   1004    0    FAIL(2)   2.0s
 CLA10359       1017    994    0    FAIL(2)   2.1s
 CLA10523       1015    997    0    FAIL(2)   2.0s
 CLA10561        723    722    0    FAIL(1)   1.7s
-CLA10559        723    722    0    FAIL(1)   1.7s
+CLA10559        723    722    0    FAIL(1)   1.8s
 CLA10106        549    549    0         OK   1.3s
-CLA10104        549    549    0         OK   1.4s
-CLA10235        412    396    0    FAIL(1)   0.5s
+CLA10104        549    549    0         OK   1.3s
+CLA10235        412    412    0         OK   0.5s
 CLA10558        171    170    0    FAIL(1)   0.5s
-CLA60017        140    140    0         OK   0.3s
-CLA50026        136    136    0         OK   0.2s
+CLA60017        140    140    0         OK   0.2s
+CLA50026        136    136    0         OK   0.3s
 CLA50025        136    136    0         OK   0.2s
 CLA40074        124    124    0         OK   0.2s
 CLA10203        122    122    0         OK   0.2s
-CLA70000        116      0    0    FAIL(3)   0.3s
+CLA70000        116    107    0    FAIL(3)   0.3s
 CLA10547        112    112    0         OK   0.2s
-CLA10070         77     47    0    FAIL(1)   0.2s
+CLA10070         77     77    0         OK   0.2s
 CLA40097         54     54    0         OK   0.2s
 CLA10212         49     49    0         OK   0.2s
-CLA10015         37      0    0    FAIL(1)   0.1s
-CLA10497         37      0    0    FAIL(1)   0.1s
-CLA10239         37      0    0    FAIL(1)   0.1s
+CLA10015         37     37    0         OK   0.2s
+CLA10497         37     37    0         OK   0.2s
+CLA10239         37     37    0         OK   0.1s
 CLA10119         34     34    0         OK   0.2s
 CLA10533         34     34    0         OK   0.2s
 CLA10310         34     34    0         OK   0.2s
-CLA20274         34      0    0    FAIL(5)   0.2s
-CLA20428         34      0    0    FAIL(5)   0.2s
-CLA20429         34      0    0    FAIL(5)   0.2s
-CLA20273         33      0    0    FAIL(1)   0.2s
+CLA20274         34     33    0    FAIL(4)   0.2s
+CLA20428         34     33    0    FAIL(4)   0.2s
+CLA20429         34     33    0    FAIL(4)   0.2s
+CLA20273         33     33    0         OK   0.2s
 CLA60014         28     28    0         OK   0.1s
 CLA10180         18     18    0         OK   0.2s
 CLA10340         18     18    0         OK   0.2s
-CLA10016         16      0    0    FAIL(1)   0.1s
-CLA10245         16      0    0    FAIL(1)   0.1s
-CLA70002         14      0    0    FAIL(3)   0.1s
+CLA10016         16     16    0         OK   0.1s
+CLA10245         16     16    0         OK   0.2s
+CLA70002         14     13    0    FAIL(3)   0.1s
 CLA40006         12     12    0         OK   0.1s
 CLA40005         12     12    0         OK   0.1s
 CLA40019         12     12    0         OK   0.1s
@@ -155,7 +155,7 @@ CLA40008         12     12    0         OK   0.1s
 CLA10162         10     10    0         OK   0.1s
 CLA10379          7      7    0         OK   0.1s
 CLA10554          6      6    0         OK   0.1s
-CLA70001          6      0    0    FAIL(1)   0.1s
+CLA70001          6      6    0         OK   0.1s
 CLA20427          5      5    0         OK   0.1s
 CLA20523          5      5    0         OK   0.1s
 CLA10243          5      5    0         OK   0.1s
