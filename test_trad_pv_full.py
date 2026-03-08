@@ -1,6 +1,6 @@
 """OD_TRAD_PV 전체 컬럼 × 전 시점 검증 (CLA00500 한정).
 
-DuckDB 단일 DB (duckdb_transform.duckdb) 사용.
+DuckDB 단일 DB (duckdb_transform.duckdb) + 일괄 로드.
 """
 import time
 import duckdb
@@ -13,21 +13,39 @@ DB_PATH = 'duckdb_transform.duckdb'
 t_start = time.time()
 con = duckdb.connect(DB_PATH, read_only=True)
 
-# 캐시 초기화 (DuckDB에서 일괄 로드)
+# 캐시 초기화
 cache = TradPVDataCache(con)
+print(f"Cache: {time.time() - t_start:.2f}s")
 
-# CLA00500 IDNOs (캐시에서 필터링)
-all_ids = con.execute(
-    'SELECT DISTINCT INFRC_IDNO FROM OD_TRAD_PV'
-).fetchdf()['INFRC_IDNO'].tolist()
+# CLA00500 일괄 로드
+t0 = time.time()
+cla500_ids = [idno for idno, v in cache.infrc.items() if v["cov_cd"] == "CLA00500"]
+cla500_set = set(cla500_ids)
 
-cla500_ids = [idno for idno in all_ids
-              if idno in cache.infrc and cache.infrc[idno]["cov_cd"] == "CLA00500"]
+mn_all = con.execute("""
+    SELECT m.INFRC_IDNO, m.CTR_TRMO_MTNPSN_CNT, m.PAY_TRMO_MTNPSN_CNT, m.CTR_TRME_MTNPSN_CNT
+    FROM OD_TBL_MN m
+    JOIN II_INFRC i ON m.INFRC_IDNO = i.INFRC_IDNO AND i.INFRC_SEQ = 1
+    WHERE m.INFRC_SEQ = 1 AND i.COV_CD = 'CLA00500'
+    ORDER BY m.INFRC_IDNO, m.SETL_AFT_PASS_MMCNT
+""").fetchdf()
 
-print(f"CLA00500 contracts: {len(cla500_ids)}")
-print(f"Cache load + filter: {time.time() - t_start:.2f}s")
+pv_all = con.execute("""
+    SELECT p.*
+    FROM OD_TRAD_PV p
+    JOIN II_INFRC i ON p.INFRC_IDNO = i.INFRC_IDNO AND i.INFRC_SEQ = 1
+    WHERE p.INFRC_SEQ = 1 AND i.COV_CD = 'CLA00500'
+    ORDER BY p.INFRC_IDNO, p.SETL_AFT_PASS_MMCNT
+""").fetchdf()
 
-# 비교 대상 컬럼 (to_dict 기준)
+# groupby로 IDNO별 인덱스 사전 구축
+mn_grouped = {idno: g for idno, g in mn_all.groupby('INFRC_IDNO')}
+pv_grouped = {idno: g for idno, g in pv_all.groupby('INFRC_IDNO')}
+
+print(f"CLA00500: {len(cla500_ids)}건, 일괄 로드: {time.time() - t0:.2f}s "
+      f"(MN={len(mn_all):,}, PV={len(pv_all):,})")
+
+# 비교 대상 컬럼
 check_cols = [
     'CTR_AFT_PASS_MMCNT', 'PREM_PAY_YN', 'ORIG_PREM', 'DC_PREM',
     'ACUM_NPREM', 'ACUM_NPREM_PRPD', 'PRPD_MMCNT', 'PRPD_PREM',
@@ -48,7 +66,6 @@ check_cols = [
     'MATU_MAINT_BNS_ACUM_AMT',
 ]
 
-# 컬럼별 집계
 col_pass = {c: 0 for c in check_cols}
 col_fail = {c: 0 for c in check_cols}
 col_max_diff = {c: 0.0 for c in check_cols}
@@ -68,32 +85,27 @@ for i, idno in enumerate(cla500_ids):
         n_err += 1
         continue
 
-    n_steps = con.execute(
-        f'SELECT COUNT(*) FROM OD_TRAD_PV WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno}'
-    ).fetchone()[0]
+    mn_df = mn_grouped.get(idno)
+    exp = pv_grouped.get(idno)
+    if exp is None or len(exp) == 0:
+        n_err += 1
+        continue
 
-    # OD_TBL_MN에서 PAY_TRMO / CTR_TRMO / CTR_TRME 로드
-    mn = con.execute(
-        f'SELECT CTR_TRMO_MTNPSN_CNT, PAY_TRMO_MTNPSN_CNT, CTR_TRME_MTNPSN_CNT '
-        f'FROM OD_TBL_MN WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
-    ).fetchdf()
-    pay_trmo = mn['PAY_TRMO_MTNPSN_CNT'].values if len(mn) > 0 else None
-    ctr_trmo = mn['CTR_TRMO_MTNPSN_CNT'].values if len(mn) > 0 else None
-    ctr_trme = mn['CTR_TRME_MTNPSN_CNT'].values if len(mn) > 0 else None
+    n_steps = len(exp)
+    pay_trmo = mn_df['PAY_TRMO_MTNPSN_CNT'].values if mn_df is not None else None
+    ctr_trmo = mn_df['CTR_TRMO_MTNPSN_CNT'].values if mn_df is not None else None
+    ctr_trme = mn_df['CTR_TRME_MTNPSN_CNT'].values if mn_df is not None else None
 
     result = compute_trad_pv(info, n_steps,
                              pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
                              ctr_trme=ctr_trme)
     d = result.to_dict()
-    exp = con.execute(
-        f'SELECT * FROM OD_TRAD_PV WHERE INFRC_SEQ = 1 AND INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
-    ).fetchdf()
 
     all_col_pass = True
     for col in check_cols:
         if col not in d or col not in exp.columns:
             continue
-        comp = np.array(d[col][:len(exp)], dtype=np.float64)
+        comp = np.array(d[col][:n_steps], dtype=np.float64)
         exv = exp[col].values.astype(np.float64)
         diff = np.max(np.abs(comp - exv))
         if diff < 1e-6:
@@ -117,7 +129,7 @@ loop_time = time.time() - t_loop
 
 print(f"\n{'='*70}")
 print(f"CLA00500 전체 점검: {len(cla500_ids)}건, ALL_PASS={n_ok}, ERR={n_err}")
-print(f"총 소요: {total_time:.1f}s (캐시: {t_loop - t_start:.1f}s, 계산: {loop_time:.1f}s)")
+print(f"총 소요: {total_time:.1f}s (캐시+로드: {t_loop - t_start:.1f}s, 계산+비교: {loop_time:.1f}s)")
 print(f"{'='*70}")
 print(f"\n{'컬럼':<30s} {'PASS':>6s} {'FAIL':>6s} {'max_diff':>12s}")
 print("-" * 60)
@@ -128,7 +140,6 @@ for col in check_cols:
     tag = "PASS" if f == 0 else "FAIL"
     print(f"{col:<30s} {p:>6d} {f:>6d} {md:>12.4f}  {tag}")
 
-# FAIL 컬럼 상세
 fail_cols = [c for c in check_cols if col_fail[c] > 0]
 if fail_cols:
     print(f"\n{'='*70}")
