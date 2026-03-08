@@ -831,16 +831,21 @@ def apply_soff_af_netting(
     results: dict,
     polno_to_idnos: dict,
     ctr_trme_map: Optional[dict] = None,
+    idno_to_cov: Optional[dict] = None,
 ) -> None:
     """CTR_POLNO 그룹 내 SOFF_AF netting (in-place).
 
-    규칙: 시점 t에서 그룹 SOFF_BF 합 < 0 → 전 계약 SOFF_AF[t] = 0.
+    규칙 (시점 t에서 그룹 SOFF_BF 합 < 0일 때):
+      - 주계약(CLA00500): AF = 0 (그룹 합으로 상계)
+      - 특약: AF = max(0, BF) (개별 floor)
+    합 >= 0이면 전 계약 AF = BF (변동 없음).
     CNCTTP_ACUMAMT_KICS도 재산출.
 
     Args:
         results: {idno: TradPVResult} — 개별 계산 완료된 결과
         polno_to_idnos: {ctr_polno: [idno, ...]} — CTR_POLNO 역매핑
         ctr_trme_map: {idno: np.ndarray} — CTR_TRME 배열 (KICS 재산출용)
+        idno_to_cov: {idno: cov_cd} — COV_CD 매핑 (주계약 식별용)
     """
     for polno, idno_list in polno_to_idnos.items():
         group = [(i, results[i]) for i in idno_list if i in results]
@@ -860,7 +865,15 @@ def apply_soff_af_netting(
             mask = neg_mask[:n]
             if not np.any(mask):
                 continue
-            r.soff_af_tmrfnd[mask] = 0.0
+
+            is_main = (idno_to_cov or {}).get(idno) == "CLA00500"
+            if is_main:
+                # 주계약: 합산 음수 시점 → AF = 0
+                r.soff_af_tmrfnd[mask] = 0.0
+            else:
+                # 특약: 합산 음수 시점 → AF = max(0, BF)
+                r.soff_af_tmrfnd[mask] = np.maximum(0.0, r.soff_bf_tmrfnd[mask])
+
             # CNCTTP_ACUMAMT_KICS 재산출
             if ctr_trme_map and idno in ctr_trme_map:
                 trme = ctr_trme_map[idno]

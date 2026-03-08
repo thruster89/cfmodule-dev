@@ -178,7 +178,8 @@ def main():
 
     # === Phase 2: CTR_POLNO netting ===
     t_net = time.time()
-    apply_soff_af_netting(all_results, cache.polno_to_idnos, ctr_trme_map)
+    idno_to_cov = {idno: v["cov_cd"] for idno, v in cache.infrc.items()}
+    apply_soff_af_netting(all_results, cache.polno_to_idnos, ctr_trme_map, idno_to_cov)
     print(f"Phase 2 (netting): {time.time() - t_net:.2f}s")
 
     # === Phase 3: 검증 ===

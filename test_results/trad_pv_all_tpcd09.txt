@@ -1,7 +1,7 @@
 
 ======================================================================
-OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,164, ERR=0
-총 소요: 74.2s
+OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,178, ERR=0
+총 소요: 79.9s
 ======================================================================
 
 컬럼                                PASS    FAIL     max_diff
@@ -37,12 +37,12 @@ APLY_PREM_ACUMAMT_EXP            28211       0       0.0000  PASS
 LWST_ADINT_TGT_AMT               28211       0       0.0000  PASS
 LWST_PREM_ACUMAMT                28211       0       0.0000  PASS
 SOFF_BF_TMRFND                   28208       3    9111.4286  FAIL
-SOFF_AF_TMRFND                   28194      17    9111.4286  FAIL
+SOFF_AF_TMRFND                   28208       3    9111.4286  FAIL
 LTRMNAT_TMRFND                   28208       3    9111.4286  FAIL
 HAFWAY_WDAMT_ADD                 28211       0       0.0000  PASS
 SOFF_BF_TMRFND_ADD               28211       0       0.0000  PASS
 SOFF_AF_TMRFND_ADD               28211       0       0.0000  PASS
-CNCTTP_ACUMAMT_KICS              28184      27  356514.5833  FAIL
+CNCTTP_ACUMAMT_KICS              28198      13  356514.5833  FAIL
 LOAN_INT                         28191      20    1451.0298  FAIL
 LOAN_REMAMT                      28191      20 1176700.0000  FAIL
 LOAN_RPAY_HAFWAY                 28191      20 1176700.0000  FAIL
@@ -59,24 +59,22 @@ SOFF_BF_TMRFND (FAIL=3, max_diff=9111.4286):
   IDNO=1355090 t=0 comp=49872.6071 exp=52064.0000 diff=2191.3929
   IDNO=1429590 t=0 comp=239666.5714 exp=248778.0000 diff=9111.4286
 
-SOFF_AF_TMRFND (FAIL=17, max_diff=9111.4286):
-  IDNO=947194 t=2 comp=0.0000 exp=135.3333 diff=135.3333
-  IDNO=1192789 t=30 comp=0.0000 exp=1190.8333 diff=1190.8333
-  IDNO=1208457 t=3 comp=0.0000 exp=164.0952 diff=164.0952
-  IDNO=119954 t=55 comp=0.0000 exp=1930.0000 diff=1930.0000
-  IDNO=256023 t=3 comp=0.0000 exp=47.4286 diff=47.4286
+SOFF_AF_TMRFND (FAIL=3, max_diff=9111.4286):
+  IDNO=1058936 t=0 comp=10659.5000 exp=11450.0000 diff=790.5000
+  IDNO=1355090 t=0 comp=49872.6071 exp=52064.0000 diff=2191.3929
+  IDNO=1429590 t=0 comp=239666.5714 exp=248778.0000 diff=9111.4286
 
 LTRMNAT_TMRFND (FAIL=3, max_diff=9111.4286):
   IDNO=1058936 t=0 comp=10659.5000 exp=11450.0000 diff=790.5000
   IDNO=1355090 t=0 comp=49872.6071 exp=52064.0000 diff=2191.3929
   IDNO=1429590 t=0 comp=239666.5714 exp=248778.0000 diff=9111.4286
 
-CNCTTP_ACUMAMT_KICS (FAIL=27, max_diff=356514.5833):
+CNCTTP_ACUMAMT_KICS (FAIL=13, max_diff=356514.5833):
   IDNO=297555 t=0 comp=13825.0000 exp=15676.6667 diff=1851.6667
-  IDNO=947194 t=2 comp=0.0000 exp=134.7695 diff=134.7695
   IDNO=415115 t=0 comp=272248.3333 exp=323343.3333 diff=51095.0000
-  IDNO=1192789 t=30 comp=0.0000 exp=1062.6308 diff=1062.6308
-  IDNO=1208457 t=3 comp=0.0000 exp=162.1634 diff=162.1634
+  IDNO=443030 t=0 comp=133445.0000 exp=158433.3333 diff=24988.3333
+  IDNO=623246 t=0 comp=1893000.0000 exp=2249514.5833 diff=356514.5833
+  IDNO=100028 t=0 comp=1439281.6667 exp=1710358.3333 diff=271076.6667
 
 LOAN_INT (FAIL=20, max_diff=1451.0298):
   IDNO=679789 t=1 comp=320.3241 exp=0.0000 diff=320.3241
@@ -106,20 +104,20 @@ COV_CD           건수     OK   FAIL
 -----------------------------------
 CLA00500       9038   9037      1  FAIL(1)
 CLA10007       6622   6612     10  FAIL(10)
-CLA10011       1499   1498      1  FAIL(1)
-CLA10363       1067   1064      3  FAIL(3)
-CLA10370       1067   1064      3  FAIL(3)
+CLA10011       1499   1499      0  OK
+CLA10363       1067   1066      1  FAIL(1)
+CLA10370       1067   1066      1  FAIL(1)
 CLA10217       1067   1066      1  FAIL(1)
 CLA10211       1028   1027      1  FAIL(1)
-CLA10359       1017   1015      2  FAIL(2)
-CLA10523       1015   1008      7  FAIL(7)
+CLA10359       1017   1016      1  FAIL(1)
+CLA10523       1015   1014      1  FAIL(1)
 CLA10561        723    722      1  FAIL(1)
 CLA10559        723    722      1  FAIL(1)
 CLA10106        549    549      0  OK
 CLA10104        549    549      0  OK
-CLA10235        412    411      1  FAIL(1)
+CLA10235        412    412      0  OK
 CLA10558        171    170      1  FAIL(1)
-CLA60017        140    139      1  FAIL(1)
+CLA60017        140    140      0  OK
 CLA50026        136    136      0  OK
 CLA50025        136    136      0  OK
 CLA40074        124    124      0  OK
