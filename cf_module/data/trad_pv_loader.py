@@ -44,6 +44,7 @@ class TradPVDataCache:
         self._load_pubano_inrt(conn)
         self._load_dc_rt(conn)
         self._load_loan_tables(conn)
+        self._load_prod_loan_tpcd(conn)
         elapsed = time.time() - t0
         logger.info(f"TradPVDataCache loaded in {elapsed:.2f}s "
                      f"(infrc={len(self.infrc)}, bas={len(self.rsvamt_bas)})")
@@ -301,6 +302,17 @@ class TradPVDataCache:
                 "loan_rpay_rt": rr[6] or 0.0, "loan_max_limt_rt": rr[7] or 0.0,
             }
 
+    # --- IP_P_PROD (CTR_LOAN_TPCD) ---
+    def _load_prod_loan_tpcd(self, conn):
+        self.prod_loan_tpcd = {}
+        rows = conn.execute("""
+            SELECT PROD_CD, CLS_CD, CTR_LOAN_TPCD
+            FROM IP_P_PROD
+        """).fetchall()
+        for r in rows:
+            cls = str(r[1]).zfill(2) if r[1] else "01"
+            self.prod_loan_tpcd[(r[0], cls)] = r[2] if r[2] is not None else 1
+
     def get_loan_params(self, prod_cd, cls_cd, assm_div_val1):
         grp = self.prod_grp.get((prod_cd, cls_cd))
         if not grp:
@@ -331,6 +343,7 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
         dc_rt_curve = cache.dc_rt_curve
 
     loan_params = cache.get_loan_params(prod_cd, cls_cd, raw.get("assm_div_val1", ""))
+    ctr_loan_tpcd = cache.prod_loan_tpcd.get((prod_cd, cls_cd), 1)
 
     acum_nprem_nobas = 0.0
     acum_nprem_old = 0.0
@@ -401,6 +414,7 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
         amort_mm=amort_mm,
         accmpt_rspb_rsvamt=raw["accmpt_rspb_rsvamt"],
         ctr_loan_remamt=raw["ctr_loan_remamt"],
+        ctr_loan_tpcd=ctr_loan_tpcd,
         acum_cov=acum_cov, expct_inrt_data=expct_inrt_data,
         pubano_params=pubano_params, dc_rt_curve=dc_rt_curve,
         loan_params=loan_params,

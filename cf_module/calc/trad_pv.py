@@ -75,6 +75,7 @@ class ContractInfo:
     pubano_params: Optional[dict] = None   # IE_PUBANO_INRT 파라미터
     dc_rt_curve: Optional[np.ndarray] = None  # IE_DC_RT 할인율 커브
     ctr_loan_remamt: float = 0.0           # II_INFRC.CTR_LOAN_REMAMT (초기 대출잔액)
+    ctr_loan_tpcd: int = 1                # IP_P_PROD.CTR_LOAN_TPCD (0=대출불가)
     loan_params: Optional[dict] = None    # IA_A_CTR_LOAN 약관대출 가정
 
 
@@ -603,7 +604,8 @@ def _calc_loan(info: ContractInfo, n_steps: int,
     loan_rpay = np.zeros(n_steps, dtype=np.float64)
 
     rem0 = info.ctr_loan_remamt
-    if rem0 == 0 or n_steps < 2:
+    # CTR_LOAN_TPCD=0 (약관대출 불가 상품) → LOAN 미처리
+    if rem0 == 0 or n_steps < 2 or info.ctr_loan_tpcd == 0:
         return {"loan_int": loan_int, "loan_remamt": loan_remamt,
                 "loan_rpay_hafway": loan_rpay}
 
