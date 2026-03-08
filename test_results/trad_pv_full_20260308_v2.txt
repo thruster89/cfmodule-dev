@@ -1,0 +1,56 @@
+CLA00500 전체 점검: 9038건, ALL_PASS=9012, ERR=0
+총 소요: 166.2s (캐시: 100.6s, 계산: 65.5s)
+======================================================================
+
+컬럼                               PASS   FAIL     max_diff
+------------------------------------------------------------
+CTR_AFT_PASS_MMCNT               9038      0       0.0000  PASS
+PREM_PAY_YN                      9038      0       0.0000  PASS
+ORIG_PREM                        9038      0       0.0000  PASS
+DC_PREM                          9038      0       0.0000  PASS
+ACUM_NPREM                       9038      0       0.0000  PASS
+ACUM_NPREM_PRPD                  9038      0       0.0000  PASS
+PRPD_MMCNT                       9038      0       0.0000  PASS
+PRPD_PREM                        9038      0       0.0000  PASS
+PAD_PREM                         9038      0       0.0000  PASS
+ADD_ACCMPT_GPREM                 9038      0       0.0000  PASS
+ADD_ACCMPT_NPREM                 9038      0       0.0000  PASS
+ACQSEXP1_BIZEXP                  9038      0       0.0000  PASS
+ACQSEXP2_BIZEXP                  9038      0       0.0000  PASS
+AFPAY_MNTEXP                     9038      0       0.0000  PASS
+LUMPAY_BIZEXP                    9038      0       0.0000  PASS
+PAY_GRCPR_ACQSEXP                9038      0       0.0000  PASS
+YSTR_RSVAMT                      9038      0       0.0000  PASS
+YYEND_RSVAMT                     9038      0       0.0000  PASS
+YSTR_RSVAMT_TRM                  9038      0       0.0000  PASS
+YYEND_RSVAMT_TRM                 9038      0       0.0000  PASS
+PENS_INRT                        9038      0       0.0000  PASS
+PENS_DEFRY_RT                    9038      0       0.0000  PASS
+PENS_ANNUAL_SUM                  9038      0       0.0000  PASS
+HAFWAY_WDAMT                     9038      0       0.0000  PASS
+APLY_PUBANO_INRT                 9038      0       0.0000  PASS
+APLY_ADINT_TGT_AMT               9038      0       0.0000  PASS
+APLY_PREM_ACUMAMT_BNFT           9038      0       0.0000  PASS
+APLY_PREM_ACUMAMT_EXP            9038      0       0.0000  PASS
+LWST_ADINT_TGT_AMT               9038      0       0.0000  PASS
+LWST_PREM_ACUMAMT                9038      0       0.0000  PASS
+SOFF_BF_TMRFND                   9038      0       0.0000  PASS
+SOFF_AF_TMRFND                   9013     25   28043.2500  FAIL
+LTRMNAT_TMRFND                   9038      0       0.0000  PASS
+HAFWAY_WDAMT_ADD                 9038      0       0.0000  PASS
+SOFF_BF_TMRFND_ADD               9038      0       0.0000  PASS
+SOFF_AF_TMRFND_ADD               9038      0       0.0000  PASS
+CNCTTP_ACUMAMT_KICS              9012     26   28043.2500  FAIL
+LOAN_INT                         9038      0       0.0000  PASS
+LOAN_REMAMT                      9038      0       0.0000  PASS
+LOAN_RPAY_HAFWAY                 9038      0       0.0000  PASS
+LOAN_NEW                         9038      0       0.0000  PASS
+LOAN_RPAY_MATU                   9038      0       0.0000  PASS
+MATU_MAINT_BNS_ACUM_AMT          9038      0       0.0000  PASS
+
+======================================================================
+FAIL 상세
+======================================================================
+
+SOFF_AF_TMRFND (25건): CTR_MM < ~80 구간 SOFF_AF=0 처리 조건 미구현
+CNCTTP_ACUMAMT_KICS (26건): SOFF_AF 연쇄

@@ -1,0 +1,133 @@
+CLA00500 전체 점검: 9038건, ALL_PASS=6, ERR=0
+======================================================================
+
+컬럼                               PASS   FAIL     max_diff
+------------------------------------------------------------
+CTR_AFT_PASS_MMCNT               9038      0       0.0000  PASS
+PREM_PAY_YN                      9038      0       0.0000  PASS
+ORIG_PREM                        9038      0       0.0000  PASS
+DC_PREM                          9038      0       0.0000  PASS
+ACUM_NPREM                       9038      0       0.0000  PASS
+ACUM_NPREM_PRPD                  9035      3    9600.4228  FAIL
+PRPD_MMCNT                       9036      2      11.0000  FAIL
+PRPD_PREM                        9037      1    1851.6667  FAIL
+PAD_PREM                         9038      0       0.0000  PASS
+ADD_ACCMPT_GPREM                 9038      0       0.0000  PASS
+ADD_ACCMPT_NPREM                 9038      0       0.0000  PASS
+ACQSEXP1_BIZEXP                  9038      0       0.0000  PASS
+ACQSEXP2_BIZEXP                  9038      0       0.0000  PASS
+AFPAY_MNTEXP                     9038      0       0.0000  PASS
+LUMPAY_BIZEXP                    9038      0       0.0000  PASS
+PAY_GRCPR_ACQSEXP                9038      0       0.0000  PASS
+YSTR_RSVAMT                      9038      0       0.0000  PASS
+YYEND_RSVAMT                     9038      0       0.0000  PASS
+YSTR_RSVAMT_TRM                  9038      0       0.0000  PASS
+YYEND_RSVAMT_TRM                 9038      0       0.0000  PASS
+PENS_INRT                        9038      0       0.0000  PASS
+PENS_DEFRY_RT                    9038      0       0.0000  PASS
+PENS_ANNUAL_SUM                  9038      0       0.0000  PASS
+HAFWAY_WDAMT                     9038      0       0.0000  PASS
+APLY_PUBANO_INRT                 9038      0       0.0000  PASS
+APLY_ADINT_TGT_AMT               9036      2    2083.0000  FAIL
+APLY_PREM_ACUMAMT_BNFT           9036      2      53.2502  FAIL
+APLY_PREM_ACUMAMT_EXP            9036      2      53.2502  FAIL
+LWST_ADINT_TGT_AMT               9036      2    2083.0000  FAIL
+LWST_PREM_ACUMAMT                9036      2      42.9619  FAIL
+SOFF_BF_TMRFND                   9036      2      53.2502  FAIL
+SOFF_AF_TMRFND                   9013     25   28043.2500  FAIL
+LTRMNAT_TMRFND                   9038      0       0.0000  PASS
+HAFWAY_WDAMT_ADD                 9038      0       0.0000  PASS
+SOFF_BF_TMRFND_ADD               9038      0       0.0000  PASS
+SOFF_AF_TMRFND_ADD               9038      0       0.0000  PASS
+CNCTTP_ACUMAMT_KICS              9012     26   28043.2500  FAIL
+LOAN_INT                            6   9032  103823.0242  FAIL
+LOAN_REMAMT                         6   9032 23012073.3614  FAIL
+LOAN_RPAY_HAFWAY                    6   9032 23012073.3614  FAIL
+LOAN_NEW                         9038      0       0.0000  PASS
+LOAN_RPAY_MATU                   9038      0       0.0000  PASS
+MATU_MAINT_BNS_ACUM_AMT          9038      0       0.0000  PASS
+
+======================================================================
+FAIL 상세 (컬럼별 최대 3건)
+======================================================================
+
+ACUM_NPREM_PRPD (FAIL=3, max_diff=9600.4228):
+  IDNO=783033 t=0 comp=0.0000 exp=9600.4228 diff=9600.4228
+  IDNO=186943 t=0 comp=0.0000 exp=3355.7200 diff=3355.7200
+  IDNO=297555 t=0 comp=0.0000 exp=1733.3620 diff=1733.3620
+
+PRPD_MMCNT (FAIL=2, max_diff=11.0000):
+  IDNO=186943 t=5 comp=0.0000 exp=5.0000 diff=5.0000
+  IDNO=297555 t=0 comp=0.0000 exp=11.0000 diff=11.0000
+
+PRPD_PREM (FAIL=1, max_diff=1851.6667):
+  IDNO=297555 t=0 comp=0.0000 exp=1851.6667 diff=1851.6667
+
+APLY_ADINT_TGT_AMT (FAIL=2, max_diff=2083.0000):
+  IDNO=625683 t=1 comp=-246.0000 exp=0.0000 diff=246.0000
+  IDNO=976901 t=1 comp=-2083.0000 exp=0.0000 diff=2083.0000
+
+APLY_PREM_ACUMAMT_BNFT (FAIL=2, max_diff=53.2502):
+  IDNO=625683 t=10 comp=-253.0079 exp=-246.0000 diff=7.0079
+  IDNO=976901 t=9 comp=-2136.2502 exp=-2083.0000 diff=53.2502
+
+APLY_PREM_ACUMAMT_EXP (FAIL=2, max_diff=53.2502):
+  IDNO=625683 t=10 comp=-253.0079 exp=-246.0000 diff=7.0079
+  IDNO=976901 t=9 comp=-2136.2502 exp=-2083.0000 diff=53.2502
+
+LWST_ADINT_TGT_AMT (FAIL=2, max_diff=2083.0000):
+  IDNO=625683 t=1 comp=-246.0000 exp=0.0000 diff=246.0000
+  IDNO=976901 t=1 comp=-2083.0000 exp=0.0000 diff=2083.0000
+
+LWST_PREM_ACUMAMT (FAIL=2, max_diff=42.9619):
+  IDNO=625683 t=10 comp=-251.6375 exp=-246.0000 diff=5.6375
+  IDNO=976901 t=9 comp=-2125.9619 exp=-2083.0000 diff=42.9619
+
+SOFF_BF_TMRFND (FAIL=2, max_diff=53.2502):
+  IDNO=625683 t=10 comp=-253.0079 exp=-246.0000 diff=7.0079
+  IDNO=976901 t=9 comp=-2136.2502 exp=-2083.0000 diff=53.2502
+
+SOFF_AF_TMRFND (FAIL=25, max_diff=28043.2500):
+  IDNO=194398 t=2 comp=4651.1994 exp=0.0000 diff=4651.1994
+  IDNO=260268 t=0 comp=4649.9405 exp=0.0000 diff=4649.9405
+  IDNO=156752 t=2 comp=8983.9413 exp=0.0000 diff=8983.9413
+
+CNCTTP_ACUMAMT_KICS (FAIL=26, max_diff=28043.2500):
+  IDNO=194398 t=2 comp=4612.3024 exp=0.0000 diff=4612.3024
+  IDNO=260268 t=0 comp=4649.9405 exp=0.0000 diff=4649.9405
+  IDNO=156752 t=2 comp=8903.0703 exp=0.0000 diff=8903.0703
+
+LOAN_INT (FAIL=9032, max_diff=103823.0242):
+  IDNO=766480 t=94 comp=168.1648 exp=0.0000 diff=168.1648
+  IDNO=134126 t=89 comp=657.3000 exp=0.0000 diff=657.3000
+  IDNO=40046 t=214 comp=414.6693 exp=0.0000 diff=414.6693
+
+LOAN_REMAMT (FAIL=9032, max_diff=23012073.3614):
+  IDNO=766480 t=94 comp=40956.0031 exp=0.0000 diff=40956.0031
+  IDNO=134126 t=102 comp=160132.2460 exp=0.0000 diff=160132.2460
+  IDNO=40046 t=214 comp=102689.4322 exp=0.0000 diff=102689.4322
+
+LOAN_RPAY_HAFWAY (FAIL=9032, max_diff=23012073.3614):
+  IDNO=766480 t=1 comp=-36184.7815 exp=0.0000 diff=36184.7815
+  IDNO=134126 t=130 comp=157721.1699 exp=0.0000 diff=157721.1699
+  IDNO=40046 t=1 comp=297522.3532 exp=354661.0000 diff=57138.6468
+
+======================================================================
+FAIL 원인 분류
+======================================================================
+
+[ADINT/ACUM 계열 2건] V<0 (음수 적립금)
+  - IDNO=625683: ACCMPT_RSPB_RSVAMT=-246, pay_stcd=2 → t>=1에서 0 처리 필요
+  - IDNO=976901: ACCMPT_RSPB_RSVAMT=-2083, pay_stcd=2 → 동일
+
+[SOFF_AF 23건 / KICS 24건] 기대값=0, comp>0
+  - BAS 미보유 적립형 계약에서 SOFF_AF가 0이 되는 추가 조건 미구현
+  - 예: IDNO=194398, 260268, 156752 등
+
+[PRPD 3건] 선납(PRPD) 미구현
+  - ACUM_NPREM_PRPD, PRPD_MMCNT, PRPD_PREM은 현재 0 출력
+  - IDNO=297555 (연납, PRPD_MM=11), 783033, 186943
+
+[LOAN 9032건] 약관대출 미구현
+  - LOAN_INT, LOAN_REMAMT, LOAN_RPAY_HAFWAY
+  - 이전 세션에서 구현했으나 코드 소실, 재구현 필요
