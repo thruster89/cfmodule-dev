@@ -4,28 +4,12 @@
 
 ---
 
-## 입력 DB
-
-```
-VSOLN2.vdb (Legacy SQLite, 원본)
-  → v2/etl.py (1회성 변환)
-    → duckdb_transform.duckdb (75개 테이블, 모든 테스트의 단일 입력 DB)
-```
-
-모든 계산/검증은 `duckdb_transform.duckdb`에서 데이터를 읽음.
-(예외: `test_v2_vs_proj_o2.py`만 VSOLN2.vdb에서 실시간 ETL → 임시 DuckDB)
-
----
-
 ## 전체 구조 요약
 
 ```
-  duckdb_transform.duckdb (입력 DB)
-             │
-             ▼
 ┌─────────────────────────────────────────────────────────┐
-│  OD_TBL_MN (유지자/납입자 산출)                          │
-│  v2/engine.py                                           │
+│  v2 Engine (OD_TBL_MN)                                  │
+│  v2/etl.py → v2/engine.py                               │
 │  위험률 중복제거 + CTR/PAY tpx + 탈퇴자 분해            │
 └──────────────────────┬──────────────────────────────────┘
                        ↓
@@ -55,10 +39,7 @@ VSOLN2.vdb (Legacy SQLite, 원본)
 | `v2/schema.py` | 202 | DuckDB Star Schema DDL (10개 테이블) |
 | `v2/etl.py` | 762 | VSOLN2.vdb(SQLite) → DuckDB 변환, 드라이버 기반 키매칭 |
 
-### 1-2. 가정 로딩 (v1 레거시 — 현재 파이프라인 미사용)
-
-> v1은 SQLite 기반 단건 처리용. 현재 MN→BN→TRAD_PV 파이프라인에서는 사용되지 않음.
-> v2/etl.py가 동일한 키매칭 로직을 DuckDB 변환 시 내장 처리.
+### 1-2. 가정 로딩 (v1 경로)
 
 | 파일 | 줄수 | 역할 |
 |------|------|------|
@@ -183,31 +164,28 @@ STEP 7  약관대출                 IA_A_CTR_LOAN 기반
 | 파일 | 줄수 | 역할 |
 |------|------|------|
 | `pipeline.py` | 352 | MN→BN→TRAD_PV 전체 흐름 오케스트레이션 |
+| `projection/projector.py` | 985 | v1 8단계 프로젝션 (timing→discount→PV) |
+| `projection/batch.py` | 177 | 배치 청크 처리 |
+
 **pipeline.py 흐름**:
 
 ```python
 run_trad_pv_pipeline(con, tpcd_filter)
-  # con = duckdb.connect('duckdb_transform.duckdb')
   → (PROD_CD, CLS_CD) 98개 그룹 루프
-    → OD_TBL_MN SELECT (DB에 이미 산출된 MN 결과 읽기)
-    → trad_pv.py (PV 산출)
+    → compute_single(idno)
+      → v2 engine (MN)
+      → tbl_bn (BN)
+      → trad_pv (PV)
 ```
-
-> 현재 pipeline.py는 MN을 DB에서 읽음. v2/engine.py 직접 호출은 아직 통합 전.
 
 ---
 
-## STEP 6. v1 레거시 — 보험료/급부/사업비/할인/PV (현재 미사용)
+## STEP 6. v1 전용 — 보험료/급부/사업비/할인/PV
 
-> v1 projector.py의 STEP 3~8. 현재 파이프라인에서 사용되지 않음.
-> v2에서는 trad_pv.py가 대체.
+> v1 projector.py의 STEP 3~8 (v2에서는 trad_pv.py가 대체)
 
 | 순서 | 파일 | 줄수 | 역할 |
 |------|------|------|------|
-| — | `projection/projector.py` | 985 | v1 8단계 오케스트레이터 |
-| — | `projection/batch.py` | 177 | v1 배치 청크 처리 |
-| 1 | `calc/timing.py` | 230 | 시간축 (경과월/년, 나이, 납입기간) |
-| 2 | `calc/decrement.py` | 859 | 중복제거 탈퇴율 + tpx |
 | 3 | `calc/premium.py` | 91 | 보험료 CF (gross/net/risk/saving) |
 | 4 | `calc/benefit.py` | 105 | 급부 CF (사망/만기/생존/해약) |
 | 5 | `calc/expense.py` | 175 | 사업비 CF (신계약/유지/수금) |
