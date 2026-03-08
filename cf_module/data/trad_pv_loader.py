@@ -58,7 +58,7 @@ class TradPVDataCache:
                    ACCMPT_GPREM, ACCMPT_RSPB_RSVAMT, TOT_TRMNAT_DDCT_AMT,
                    PAYPR_DVCD, ETC_EXPCT_BIZEXP_KEY_VAL,
                    ASSM_DIV_VAL1, CTR_LOAN_REMAMT,
-                   INSTRM_DVCD, RENW_STCD, PAYCYC_DVCD
+                   INSTRM_DVCD, RENW_STCD, PAYCYC_DVCD, CTR_POLNO
             FROM II_INFRC WHERE INFRC_SEQ = 1
         """).fetchall()
         for r in rows:
@@ -83,7 +83,14 @@ class TradPVDataCache:
                 "instrm_dvcd": r[20] or "",
                 "renw_stcd": r[21] or 0,
                 "paycyc_dvcd": r[22] or 0,
+                "ctr_polno": r[23] or "",
             }
+        # CTR_POLNO → IDNO 리스트 역매핑
+        self.polno_to_idnos = {}
+        for idno, v in self.infrc.items():
+            polno = v["ctr_polno"]
+            if polno:
+                self.polno_to_idnos.setdefault(polno, []).append(idno)
 
     # --- II_RSVAMT_BAS ---
     def _load_rsvamt_bas(self, conn):

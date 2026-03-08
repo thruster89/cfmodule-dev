@@ -821,3 +821,47 @@ def _compute_acum_interest_based(
             lwst_acum[t] = adint_lwst + cum_int_lwst
 
     return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
+
+
+# ---------------------------------------------------------------------------
+# CTR_POLNO 단위 SOFF_AF netting (후처리)
+# ---------------------------------------------------------------------------
+
+def apply_soff_af_netting(
+    results: dict,
+    polno_to_idnos: dict,
+    ctr_trme_map: Optional[dict] = None,
+) -> None:
+    """CTR_POLNO 그룹 내 SOFF_AF netting (in-place).
+
+    규칙: 시점 t에서 그룹 SOFF_BF 합 < 0 → 전 계약 SOFF_AF[t] = 0.
+    CNCTTP_ACUMAMT_KICS도 재산출.
+
+    Args:
+        results: {idno: TradPVResult} — 개별 계산 완료된 결과
+        polno_to_idnos: {ctr_polno: [idno, ...]} — CTR_POLNO 역매핑
+        ctr_trme_map: {idno: np.ndarray} — CTR_TRME 배열 (KICS 재산출용)
+    """
+    for polno, idno_list in polno_to_idnos.items():
+        group = [(i, results[i]) for i in idno_list if i in results]
+        if len(group) <= 1:
+            continue
+
+        max_t = max(r.n_steps for _, r in group)
+        # 시점별 SOFF_BF 합산
+        bf_sum = np.zeros(max_t, dtype=np.float64)
+        for _, r in group:
+            bf_sum[:r.n_steps] += r.soff_bf_tmrfnd
+
+        neg_mask = bf_sum < 0  # 합산 음수 시점
+
+        for idno, r in group:
+            n = r.n_steps
+            mask = neg_mask[:n]
+            if not np.any(mask):
+                continue
+            r.soff_af_tmrfnd[mask] = 0.0
+            # CNCTTP_ACUMAMT_KICS 재산출
+            if ctr_trme_map and idno in ctr_trme_map:
+                trme = ctr_trme_map[idno]
+                r.cncttp_acumamt_kics[:] = r.soff_af_tmrfnd * trme[:n]

@@ -1,7 +1,7 @@
 
 ======================================================================
-OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,025, ERR=0
-총 소요: 75.3s
+OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,164, ERR=0
+총 소요: 74.2s
 ======================================================================
 
 컬럼                                PASS    FAIL     max_diff
@@ -37,12 +37,12 @@ APLY_PREM_ACUMAMT_EXP            28211       0       0.0000  PASS
 LWST_ADINT_TGT_AMT               28211       0       0.0000  PASS
 LWST_PREM_ACUMAMT                28211       0       0.0000  PASS
 SOFF_BF_TMRFND                   28208       3    9111.4286  FAIL
-SOFF_AF_TMRFND                   28055     156   28043.2500  FAIL
+SOFF_AF_TMRFND                   28194      17    9111.4286  FAIL
 LTRMNAT_TMRFND                   28208       3    9111.4286  FAIL
 HAFWAY_WDAMT_ADD                 28211       0       0.0000  PASS
 SOFF_BF_TMRFND_ADD               28211       0       0.0000  PASS
 SOFF_AF_TMRFND_ADD               28211       0       0.0000  PASS
-CNCTTP_ACUMAMT_KICS              28045     166  356514.5833  FAIL
+CNCTTP_ACUMAMT_KICS              28184      27  356514.5833  FAIL
 LOAN_INT                         28191      20    1451.0298  FAIL
 LOAN_REMAMT                      28191      20 1176700.0000  FAIL
 LOAN_RPAY_HAFWAY                 28191      20 1176700.0000  FAIL
@@ -59,108 +59,108 @@ SOFF_BF_TMRFND (FAIL=3, max_diff=9111.4286):
   IDNO=1355090 t=0 comp=49872.6071 exp=52064.0000 diff=2191.3929
   IDNO=1429590 t=0 comp=239666.5714 exp=248778.0000 diff=9111.4286
 
-SOFF_AF_TMRFND (FAIL=156, max_diff=28043.2500):
-  IDNO=73639 t=1 comp=24432.9687 exp=0.0000 diff=24432.9687
-  IDNO=83111 t=0 comp=11912.0833 exp=0.0000 diff=11912.0833
-  IDNO=85476 t=0 comp=28043.2500 exp=0.0000 diff=28043.2500
-  IDNO=91801 t=0 comp=-672.8333 exp=0.0000 diff=672.8333
-  IDNO=102651 t=0 comp=-1431.7857 exp=0.0000 diff=1431.7857
+SOFF_AF_TMRFND (FAIL=17, max_diff=9111.4286):
+  IDNO=947194 t=2 comp=0.0000 exp=135.3333 diff=135.3333
+  IDNO=1192789 t=30 comp=0.0000 exp=1190.8333 diff=1190.8333
+  IDNO=1208457 t=3 comp=0.0000 exp=164.0952 diff=164.0952
+  IDNO=119954 t=55 comp=0.0000 exp=1930.0000 diff=1930.0000
+  IDNO=256023 t=3 comp=0.0000 exp=47.4286 diff=47.4286
 
 LTRMNAT_TMRFND (FAIL=3, max_diff=9111.4286):
   IDNO=1058936 t=0 comp=10659.5000 exp=11450.0000 diff=790.5000
   IDNO=1355090 t=0 comp=49872.6071 exp=52064.0000 diff=2191.3929
   IDNO=1429590 t=0 comp=239666.5714 exp=248778.0000 diff=9111.4286
 
-CNCTTP_ACUMAMT_KICS (FAIL=166, max_diff=356514.5833):
-  IDNO=73639 t=1 comp=24322.7507 exp=0.0000 diff=24322.7507
-  IDNO=83111 t=0 comp=11912.0833 exp=0.0000 diff=11912.0833
-  IDNO=85476 t=0 comp=28043.2500 exp=0.0000 diff=28043.2500
-  IDNO=91801 t=0 comp=-672.8333 exp=0.0000 diff=672.8333
-  IDNO=102651 t=0 comp=-1431.7857 exp=0.0000 diff=1431.7857
+CNCTTP_ACUMAMT_KICS (FAIL=27, max_diff=356514.5833):
+  IDNO=297555 t=0 comp=13825.0000 exp=15676.6667 diff=1851.6667
+  IDNO=947194 t=2 comp=0.0000 exp=134.7695 diff=134.7695
+  IDNO=415115 t=0 comp=272248.3333 exp=323343.3333 diff=51095.0000
+  IDNO=1192789 t=30 comp=0.0000 exp=1062.6308 diff=1062.6308
+  IDNO=1208457 t=3 comp=0.0000 exp=162.1634 diff=162.1634
 
 LOAN_INT (FAIL=20, max_diff=1451.0298):
   IDNO=679789 t=1 comp=320.3241 exp=0.0000 diff=320.3241
   IDNO=680901 t=1 comp=44.3842 exp=0.0000 diff=44.3842
   IDNO=681158 t=1 comp=16.0332 exp=0.0000 diff=16.0332
-  IDNO=265478 t=1 comp=765.1158 exp=0.0000 diff=765.1158
-  IDNO=268003 t=1 comp=172.3614 exp=0.0000 diff=172.3614
+  IDNO=681397 t=1 comp=33.9852 exp=0.0000 diff=33.9852
+  IDNO=685378 t=1 comp=110.4544 exp=0.0000 diff=110.4544
 
 LOAN_REMAMT (FAIL=20, max_diff=1176700.0000):
   IDNO=679789 t=0 comp=259764.0000 exp=0.0000 diff=259764.0000
   IDNO=680901 t=0 comp=35993.0000 exp=0.0000 diff=35993.0000
   IDNO=681158 t=0 comp=13002.0000 exp=0.0000 diff=13002.0000
-  IDNO=265478 t=0 comp=620464.0000 exp=0.0000 diff=620464.0000
-  IDNO=268003 t=0 comp=139775.0000 exp=0.0000 diff=139775.0000
+  IDNO=681397 t=0 comp=27560.0000 exp=0.0000 diff=27560.0000
+  IDNO=685378 t=0 comp=89572.0000 exp=0.0000 diff=89572.0000
 
 LOAN_RPAY_HAFWAY (FAIL=20, max_diff=1176700.0000):
   IDNO=679789 t=1 comp=259764.0000 exp=0.0000 diff=259764.0000
   IDNO=680901 t=1 comp=35993.0000 exp=0.0000 diff=35993.0000
   IDNO=681158 t=1 comp=13002.0000 exp=0.0000 diff=13002.0000
-  IDNO=265478 t=1 comp=620464.0000 exp=0.0000 diff=620464.0000
-  IDNO=268003 t=1 comp=139775.0000 exp=0.0000 diff=139775.0000
+  IDNO=681397 t=1 comp=27560.0000 exp=0.0000 diff=27560.0000
+  IDNO=685378 t=1 comp=89572.0000 exp=0.0000 diff=89572.0000
 
 ======================================================================
 COV_CD별 요약
 ======================================================================
-COV_CD           건수     OK  ERR  FAIL_COLS     시간
---------------------------------------------------
-CLA00500       9038   9012    0    FAIL(2)  25.5s
-CLA10007       6622   6612    0    FAIL(3)  18.1s
-CLA10011       1499   1499    0         OK   2.0s
-CLA10363       1067   1045    0    FAIL(2)   2.7s
-CLA10370       1067   1044    0    FAIL(2)   2.5s
-CLA10217       1067   1043    0    FAIL(2)   2.7s
-CLA10211       1028   1004    0    FAIL(2)   2.0s
-CLA10359       1017    994    0    FAIL(2)   2.1s
-CLA10523       1015    997    0    FAIL(2)   2.0s
-CLA10561        723    722    0    FAIL(1)   1.7s
-CLA10559        723    722    0    FAIL(1)   1.8s
-CLA10106        549    549    0         OK   1.3s
-CLA10104        549    549    0         OK   1.3s
-CLA10235        412    412    0         OK   0.5s
-CLA10558        171    170    0    FAIL(1)   0.5s
-CLA60017        140    140    0         OK   0.2s
-CLA50026        136    136    0         OK   0.3s
-CLA50025        136    136    0         OK   0.2s
-CLA40074        124    124    0         OK   0.2s
-CLA10203        122    122    0         OK   0.2s
-CLA70000        116    107    0    FAIL(3)   0.3s
-CLA10547        112    112    0         OK   0.2s
-CLA10070         77     77    0         OK   0.2s
-CLA40097         54     54    0         OK   0.2s
-CLA10212         49     49    0         OK   0.2s
-CLA10015         37     37    0         OK   0.2s
-CLA10497         37     37    0         OK   0.2s
-CLA10239         37     37    0         OK   0.1s
-CLA10119         34     34    0         OK   0.2s
-CLA10533         34     34    0         OK   0.2s
-CLA10310         34     34    0         OK   0.2s
-CLA20274         34     33    0    FAIL(4)   0.2s
-CLA20428         34     33    0    FAIL(4)   0.2s
-CLA20429         34     33    0    FAIL(4)   0.2s
-CLA20273         33     33    0         OK   0.2s
-CLA60014         28     28    0         OK   0.1s
-CLA10180         18     18    0         OK   0.2s
-CLA10340         18     18    0         OK   0.2s
-CLA10016         16     16    0         OK   0.1s
-CLA10245         16     16    0         OK   0.2s
-CLA70002         14     13    0    FAIL(3)   0.1s
-CLA40006         12     12    0         OK   0.1s
-CLA40005         12     12    0         OK   0.1s
-CLA40019         12     12    0         OK   0.1s
-CLA10339         12     12    0         OK   0.1s
-CLA40014         12     12    0         OK   0.1s
-CLA10178         12     12    0         OK   0.1s
-CLA40008         12     12    0         OK   0.1s
-CLA10162         10     10    0         OK   0.1s
-CLA10379          7      7    0         OK   0.1s
-CLA10554          6      6    0         OK   0.1s
-CLA70001          6      6    0         OK   0.1s
-CLA20427          5      5    0         OK   0.1s
-CLA20523          5      5    0         OK   0.1s
-CLA10243          5      5    0         OK   0.1s
-CLA10164          3      3    0         OK   0.1s
-CLA10334          3      3    0         OK   0.1s
-CLA10552          3      3    0         OK   0.1s
-CLA10557          2      2    0         OK   0.1s
-CLA10191          1      1    0         OK   0.0s
+COV_CD           건수     OK   FAIL
+-----------------------------------
+CLA00500       9038   9037      1  FAIL(1)
+CLA10007       6622   6612     10  FAIL(10)
+CLA10011       1499   1498      1  FAIL(1)
+CLA10363       1067   1064      3  FAIL(3)
+CLA10370       1067   1064      3  FAIL(3)
+CLA10217       1067   1066      1  FAIL(1)
+CLA10211       1028   1027      1  FAIL(1)
+CLA10359       1017   1015      2  FAIL(2)
+CLA10523       1015   1008      7  FAIL(7)
+CLA10561        723    722      1  FAIL(1)
+CLA10559        723    722      1  FAIL(1)
+CLA10106        549    549      0  OK
+CLA10104        549    549      0  OK
+CLA10235        412    411      1  FAIL(1)
+CLA10558        171    170      1  FAIL(1)
+CLA60017        140    139      1  FAIL(1)
+CLA50026        136    136      0  OK
+CLA50025        136    136      0  OK
+CLA40074        124    124      0  OK
+CLA10203        122    122      0  OK
+CLA70000        116    107      9  FAIL(9)
+CLA10547        112    112      0  OK
+CLA10070         77     77      0  OK
+CLA40097         54     54      0  OK
+CLA10212         49     49      0  OK
+CLA10015         37     37      0  OK
+CLA10497         37     37      0  OK
+CLA10239         37     37      0  OK
+CLA10119         34     34      0  OK
+CLA10533         34     34      0  OK
+CLA10310         34     34      0  OK
+CLA20274         34     33      1  FAIL(1)
+CLA20428         34     33      1  FAIL(1)
+CLA20429         34     33      1  FAIL(1)
+CLA20273         33     33      0  OK
+CLA60014         28     28      0  OK
+CLA10180         18     18      0  OK
+CLA10340         18     18      0  OK
+CLA10016         16     16      0  OK
+CLA10245         16     16      0  OK
+CLA70002         14     13      1  FAIL(1)
+CLA40006         12     12      0  OK
+CLA40005         12     12      0  OK
+CLA40019         12     12      0  OK
+CLA10339         12     12      0  OK
+CLA40014         12     12      0  OK
+CLA10178         12     12      0  OK
+CLA40008         12     12      0  OK
+CLA10162         10     10      0  OK
+CLA10379          7      7      0  OK
+CLA10554          6      6      0  OK
+CLA70001          6      6      0  OK
+CLA20427          5      5      0  OK
+CLA20523          5      5      0  OK
+CLA10243          5      5      0  OK
+CLA10164          3      3      0  OK
+CLA10334          3      3      0  OK
+CLA10552          3      3      0  OK
+CLA10557          2      2      0  OK
+CLA10191          1      1      0  OK

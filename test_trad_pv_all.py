@@ -1,4 +1,4 @@
-"""OD_TRAD_PV 전체 검증 — CTR_TPCD IN ('0','9'), COV_CD 배치.
+"""OD_TRAD_PV 전체 검증 — CTR_TPCD IN ('0','9'), CTR_POLNO netting 적용.
 
 Usage:
     python test_trad_pv_all.py
@@ -9,7 +9,7 @@ import argparse
 import time
 import duckdb
 import numpy as np
-from cf_module.calc.trad_pv import compute_trad_pv
+from cf_module.calc.trad_pv import compute_trad_pv, apply_soff_af_netting
 from cf_module.data.trad_pv_loader import TradPVDataCache, build_contract_info_cached
 
 DB_PATH = 'duckdb_transform.duckdb'
@@ -36,8 +36,8 @@ CHECK_COLS = [
 ]
 
 
-def run_batch(con, cache, idnos, mn_grouped, pv_grouped):
-    """배치 내 건별 검증. Returns (col_pass, col_fail, col_max_diff, col_fail_examples, n_ok, n_err)."""
+def verify_results(results, pv_grouped):
+    """결과 검증. Returns (col_pass, col_fail, col_max_diff, col_fail_examples, n_ok, n_err)."""
     col_pass = {c: 0 for c in CHECK_COLS}
     col_fail = {c: 0 for c in CHECK_COLS}
     col_max_diff = {c: 0.0 for c in CHECK_COLS}
@@ -45,34 +45,14 @@ def run_batch(con, cache, idnos, mn_grouped, pv_grouped):
     n_ok = 0
     n_err = 0
 
-    for idno in idnos:
-        info = build_contract_info_cached(cache, idno)
-        if not info:
-            n_err += 1
-            continue
-
-        mn_df = mn_grouped.get(idno)
+    for idno, result in results.items():
         exp = pv_grouped.get(idno)
         if exp is None or len(exp) == 0:
             n_err += 1
             continue
 
-        n_steps = len(exp)
-        pay_trmo = mn_df['PAY_TRMO_MTNPSN_CNT'].values if mn_df is not None else None
-        ctr_trmo = mn_df['CTR_TRMO_MTNPSN_CNT'].values if mn_df is not None else None
-        ctr_trme = mn_df['CTR_TRME_MTNPSN_CNT'].values if mn_df is not None else None
-
-        try:
-            result = compute_trad_pv(info, n_steps,
-                                     pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
-                                     ctr_trme=ctr_trme)
-        except Exception as e:
-            n_err += 1
-            if n_err <= 3:
-                print(f"    ERR IDNO={idno}: {e}")
-            continue
-
         d = result.to_dict()
+        n_steps = result.n_steps
 
         all_col_pass = True
         for col in CHECK_COLS:
@@ -88,7 +68,7 @@ def run_batch(con, cache, idnos, mn_grouped, pv_grouped):
                 all_col_pass = False
                 if diff > col_max_diff[col]:
                     col_max_diff[col] = diff
-                if len(col_fail_examples[col]) < 3:
+                if len(col_fail_examples[col]) < 5:
                     idx = int(np.argmax(np.abs(comp - exv)))
                     col_fail_examples[col].append(
                         f"IDNO={idno} t={idx} comp={comp[idx]:.4f} exp={exv[idx]:.4f} diff={diff:.4f}"
@@ -98,21 +78,6 @@ def run_batch(con, cache, idnos, mn_grouped, pv_grouped):
             n_ok += 1
 
     return col_pass, col_fail, col_max_diff, col_fail_examples, n_ok, n_err
-
-
-def merge_stats(total, batch):
-    """배치 결과를 전체에 합산."""
-    tp, tf, tmd, tfe, tok, terr = total
-    bp, bf, bmd, bfe, bok, berr = batch
-    for c in CHECK_COLS:
-        tp[c] += bp[c]
-        tf[c] += bf[c]
-        if bmd[c] > tmd[c]:
-            tmd[c] = bmd[c]
-        for ex in bfe[c]:
-            if len(tfe[c]) < 5:
-                tfe[c].append(ex)
-    return tp, tf, tmd, tfe, tok + bok, terr + berr
 
 
 def main():
@@ -126,39 +91,32 @@ def main():
     cache = TradPVDataCache(con)
     print(f"Cache: {time.time() - t_start:.2f}s")
 
-    # TPCD (0,9) 대상 IDNO + COV_CD
+    # TPCD (0,9) 대상 IDNO
     target = {idno: v for idno, v in cache.infrc.items()
               if str(v["ctr_tpcd"]) in ("0", "9")}
 
-    # COV_CD별 그룹
+    if args.cov:
+        target = {idno: v for idno, v in target.items() if v["cov_cd"] == args.cov}
+
+    target_ids = list(target.keys())
+    total_ids = len(target_ids)
+
+    # COV_CD별 그룹 (배치 로드용)
     cov_groups = {}
     for idno, v in target.items():
-        cov = v["cov_cd"]
-        cov_groups.setdefault(cov, []).append(idno)
-
-    if args.cov:
-        cov_groups = {k: v for k, v in cov_groups.items() if k == args.cov}
-
-    total_ids = sum(len(v) for v in cov_groups.values())
+        cov_groups.setdefault(v["cov_cd"], []).append(idno)
     print(f"대상: {total_ids:,}건, {len(cov_groups)} COV_CD")
 
-    # 전체 집계
-    total = (
-        {c: 0 for c in CHECK_COLS},
-        {c: 0 for c in CHECK_COLS},
-        {c: 0.0 for c in CHECK_COLS},
-        {c: [] for c in CHECK_COLS},
-        0, 0,
-    )
-
-    # COV_CD별 요약
-    cov_summary = []
+    # === Phase 1: 전체 계산 (COV_CD 배치 로드) ===
+    t_calc = time.time()
+    all_results = {}       # {idno: TradPVResult}
+    all_pv_grouped = {}    # {idno: DataFrame}
+    ctr_trme_map = {}      # {idno: np.ndarray}
+    n_err = 0
 
     for ci, (cov_cd, idnos) in enumerate(sorted(cov_groups.items(),
                                                   key=lambda x: -len(x[1]))):
         t0 = time.time()
-
-        # 해당 COV_CD의 OD_TBL_MN / OD_TRAD_PV 일괄 조회
         id_list = ",".join(str(i) for i in idnos)
         mn_df = con.execute(f"""
             SELECT INFRC_IDNO, CTR_TRMO_MTNPSN_CNT, PAY_TRMO_MTNPSN_CNT, CTR_TRME_MTNPSN_CNT
@@ -175,31 +133,59 @@ def main():
 
         mn_grouped = {i: g for i, g in mn_df.groupby('INFRC_IDNO')}
         pv_grouped = {i: g for i, g in pv_df.groupby('INFRC_IDNO')}
+        all_pv_grouped.update(pv_grouped)
 
-        batch = run_batch(con, cache, idnos, mn_grouped, pv_grouped)
-        total = merge_stats(total, batch)
+        batch_ok = 0
+        batch_err = 0
+        for idno in idnos:
+            info = build_contract_info_cached(cache, idno)
+            if not info:
+                batch_err += 1
+                continue
 
-        bp, bf, bmd, bfe, bok, berr = batch
-        fail_cols = [c for c in CHECK_COLS if bf[c] > 0]
+            mn = mn_grouped.get(idno)
+            exp = pv_grouped.get(idno)
+            if exp is None or len(exp) == 0:
+                batch_err += 1
+                continue
+
+            n_steps = len(exp)
+            pay_trmo = mn['PAY_TRMO_MTNPSN_CNT'].values if mn is not None else None
+            ctr_trmo = mn['CTR_TRMO_MTNPSN_CNT'].values if mn is not None else None
+            ctr_trme = mn['CTR_TRME_MTNPSN_CNT'].values if mn is not None else None
+
+            try:
+                result = compute_trad_pv(info, n_steps,
+                                         pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
+                                         ctr_trme=ctr_trme)
+            except Exception as e:
+                batch_err += 1
+                if batch_err <= 3:
+                    print(f"    ERR IDNO={idno}: {e}")
+                continue
+
+            all_results[idno] = result
+            if ctr_trme is not None:
+                ctr_trme_map[idno] = ctr_trme
+            batch_ok += 1
+
+        n_err += batch_err
         elapsed = time.time() - t0
-
-        status = "ALL PASS" if not fail_cols else f"FAIL({len(fail_cols)}cols)"
         print(f"  [{ci+1:>2d}/{len(cov_groups)}] {cov_cd}: {len(idnos):>5d}건 "
-              f"{elapsed:>5.1f}s  OK={bok} ERR={berr}  {status}")
+              f"{elapsed:>5.1f}s  계산={batch_ok} ERR={batch_err}")
 
-        if fail_cols:
-            for c in fail_cols[:5]:
-                print(f"         {c}: FAIL={bf[c]} max={bmd[c]:.4f}")
+    print(f"\nPhase 1 (계산): {time.time() - t_calc:.1f}s, {len(all_results):,}건 완료, ERR={n_err}")
 
-        cov_summary.append({
-            "cov_cd": cov_cd, "count": len(idnos),
-            "ok": bok, "err": berr,
-            "fail_cols": len(fail_cols),
-            "time": elapsed,
-        })
+    # === Phase 2: CTR_POLNO netting ===
+    t_net = time.time()
+    apply_soff_af_netting(all_results, cache.polno_to_idnos, ctr_trme_map)
+    print(f"Phase 2 (netting): {time.time() - t_net:.2f}s")
 
-    # === 전체 결과 ===
-    tp, tf, tmd, tfe, tok, terr = total
+    # === Phase 3: 검증 ===
+    t_verify = time.time()
+    tp, tf, tmd, tfe, tok, terr = verify_results(all_results, all_pv_grouped)
+    print(f"Phase 3 (검증): {time.time() - t_verify:.1f}s")
+
     total_time = time.time() - t_start
 
     lines = []
@@ -209,7 +195,7 @@ def main():
 
     p(f"\n{'='*70}")
     p(f"OD_TRAD_PV 전체 검증: {total_ids:,}건 (TPCD 0,9), "
-      f"ALL_PASS={tok:,}, ERR={terr}")
+      f"ALL_PASS={tok:,}, ERR={n_err}")
     p(f"총 소요: {total_time:.1f}s")
     p(f"{'='*70}")
     p(f"\n{'컬럼':<30s} {'PASS':>7s} {'FAIL':>7s} {'max_diff':>12s}")
@@ -235,15 +221,39 @@ def main():
     p(f"\n{'='*70}")
     p("COV_CD별 요약")
     p(f"{'='*70}")
-    p(f"{'COV_CD':<12s} {'건수':>6s} {'OK':>6s} {'ERR':>4s} {'FAIL_COLS':>10s} {'시간':>6s}")
-    p("-" * 50)
-    for s in cov_summary:
-        tag = "OK" if s["fail_cols"] == 0 else f"FAIL({s['fail_cols']})"
-        p(f"{s['cov_cd']:<12s} {s['count']:>6d} {s['ok']:>6d} {s['err']:>4d} "
-          f"{tag:>10s} {s['time']:>5.1f}s")
+    cov_stats = {}
+    for idno, result in all_results.items():
+        cov = target[idno]["cov_cd"]
+        d = result.to_dict()
+        exp = all_pv_grouped.get(idno)
+        if exp is None:
+            continue
+        n = result.n_steps
+        has_fail = False
+        for col in CHECK_COLS:
+            if col not in d or col not in exp.columns:
+                continue
+            comp = np.array(d[col][:n], dtype=np.float64)
+            exv = exp[col].values.astype(np.float64)
+            if np.max(np.abs(comp - exv)) >= 1e-6:
+                has_fail = True
+                break
+        s = cov_stats.setdefault(cov, {"ok": 0, "fail": 0})
+        if has_fail:
+            s["fail"] += 1
+        else:
+            s["ok"] += 1
+
+    p(f"{'COV_CD':<12s} {'건수':>6s} {'OK':>6s} {'FAIL':>6s}")
+    p("-" * 35)
+    for cov in sorted(cov_stats, key=lambda c: -(cov_stats[c]["ok"]+cov_stats[c]["fail"])):
+        s = cov_stats[cov]
+        total_c = s["ok"] + s["fail"]
+        tag = "OK" if s["fail"] == 0 else f"FAIL({s['fail']})"
+        p(f"{cov:<12s} {total_c:>6d} {s['ok']:>6d} {s['fail']:>6d}  {tag}")
 
     if args.save:
-        fname = f"test_results/trad_pv_all_tpcd09.txt"
+        fname = "test_results/trad_pv_all_tpcd09.txt"
         with open(fname, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         print(f"\n결과 저장: {fname}")
