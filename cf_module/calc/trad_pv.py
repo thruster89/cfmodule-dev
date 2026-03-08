@@ -490,10 +490,13 @@ def _calc_surrender(info: ContractInfo, n_steps: int,
     cls_cd = str(info.cls_cd)
     acqsexp1_val = info.acqsexp1
 
-    # ACQSEXP 차감 판정
+    # ACQSEXP 차감 판정 (PAY_STCD=3 납입면제 시 미적용)
     apply_deduction = (
-        (prod_cd in SOFF_DEDUCT_PRODS and info.pterm_yy > 5)
-        or (ctr_tpcd == "0" and acqsexp1_val > 0)
+        info.pay_stcd != 3
+        and (
+            (prod_cd in SOFF_DEDUCT_PRODS and info.pterm_yy > 5)
+            or (ctr_tpcd == "0" and acqsexp1_val > 0)
+        )
     )
 
     # SOFF 납입중 비율
@@ -522,9 +525,11 @@ def _calc_surrender(info: ContractInfo, n_steps: int,
     # LTRMNAT: CTR_TPCD='9' → 0, else → max(0, ACUM - deduction)
     if ctr_tpcd == "9":
         ltrmnat_tmrfnd = np.zeros(n_steps, dtype=np.float64)
-    else:
+    elif apply_deduction:
         deduction = acqsexp1_val * np.maximum(84 - ctr_mm, 0) / 84
         ltrmnat_tmrfnd = np.maximum(0, aply_prem_acumamt_bnft - deduction)
+    else:
+        ltrmnat_tmrfnd = np.maximum(0, aply_prem_acumamt_bnft.copy())
 
     return {
         "soff_bf_tmrfnd": soff_bf_tmrfnd,
