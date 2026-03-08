@@ -12,7 +12,9 @@ Usage:
     con.close()
 """
 
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -117,6 +119,8 @@ def run_trad_pv_pipeline(
     prod_cls_filter: Optional[Tuple[str, str]] = None,
     idno_filter: Optional[Set[int]] = None,
     progress_callback=None,
+    fast_mode: bool = False,
+    max_workers: int = 0,
 ) -> Tuple[Dict[int, TradPVResult], PipelineStats]:
     """OD_TRAD_PV 통합 파이프라인.
 
@@ -143,6 +147,8 @@ def run_trad_pv_pipeline(
         prod_cls_filter: 특정 (PROD_CD, CLS_CD)만 계산
         idno_filter: 특정 IDNO 집합만 계산
         progress_callback: fn(group_idx, n_groups, prod_cd, cls_cd, n_contracts)
+        fast_mode: True=성능 우선 (배열 복사 생략, 멀티스레딩 활성화)
+        max_workers: 스레드 수 (0=CPU 수 기반 자동, fast_mode=True 시만 적용)
 
     Returns:
         (results, stats)
@@ -197,6 +203,40 @@ def run_trad_pv_pipeline(
     all_results: Dict[int, TradPVResult] = {}
     idno_to_cov = {idno: v["cov_cd"] for idno, v in cache.infrc.items()}
 
+    # 스레드 수 결정: max_workers>1 명시 시에만 병렬화
+    # 주의: Python GIL로 인해 CPU-bound numpy 연산은 ThreadPoolExecutor 효과 미미
+    # 실제 병렬화가 필요하면 ProcessPoolExecutor 또는 multiprocessing 사용 권장
+    n_workers = max_workers if max_workers > 0 else 1
+    use_parallel = n_workers > 1
+
+    def _compute_one(idno):
+        """단건 계산 (스레드 안전: 입력 읽기전용, 출력 독립)."""
+        info = build_contract_info_cached(cache, idno)
+        if not info:
+            return idno, None, None, "no_info"
+
+        n_steps = step_counts.get(idno)
+        if not n_steps:
+            return idno, None, None, "no_steps"
+
+        mn = mn_data.get(idno)
+        pay_trmo = mn["pay_trmo"] if mn else None
+        ctr_trmo = mn["ctr_trmo"] if mn else None
+        ctr_trme = mn["ctr_trme"] if mn else None
+
+        try:
+            result = compute_trad_pv(
+                info, n_steps,
+                pay_trmo=pay_trmo,
+                ctr_trmo=ctr_trmo,
+                ctr_trme=ctr_trme,
+                fast_mode=fast_mode,
+            )
+        except Exception as e:
+            return idno, None, None, str(e)
+
+        return idno, result, ctr_trme, None
+
     sorted_groups = sorted(prod_cls_groups.items(), key=lambda x: -len(x[1]))
     for gi, ((prod_cd, cls_cd), idnos) in enumerate(sorted_groups):
         t_grp = time.time()
@@ -205,39 +245,33 @@ def run_trad_pv_pipeline(
         batch_ok = 0
         batch_err = 0
 
-        for idno in idnos:
-            info = build_contract_info_cached(cache, idno)
-            if not info:
-                batch_err += 1
-                continue
-
-            n_steps = step_counts.get(idno)
-            if not n_steps:
-                batch_err += 1
-                continue
-
-            mn = mn_data.get(idno)
-            pay_trmo = mn["pay_trmo"] if mn else None
-            ctr_trmo = mn["ctr_trmo"] if mn else None
-            ctr_trme = mn["ctr_trme"] if mn else None
-
-            try:
-                result = compute_trad_pv(
-                    info, n_steps,
-                    pay_trmo=pay_trmo,
-                    ctr_trmo=ctr_trmo,
-                    ctr_trme=ctr_trme,
-                )
-            except Exception as e:
-                batch_err += 1
-                if batch_err <= 3:
-                    logger.warning(f"ERR IDNO={idno}: {e}")
-                continue
-
-            batch_results[idno] = result
-            if ctr_trme is not None:
-                ctr_trme_map[idno] = ctr_trme
-            batch_ok += 1
+        if use_parallel and len(idnos) > 50:
+            # 병렬 실행: 50건 초과 그룹만 (오버헤드 방지)
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = list(executor.map(_compute_one, idnos))
+            for idno, result, ctr_trme, err in futures:
+                if err:
+                    batch_err += 1
+                    if batch_err <= 3 and err not in ("no_info", "no_steps"):
+                        logger.warning(f"ERR IDNO={idno}: {err}")
+                    continue
+                batch_results[idno] = result
+                if ctr_trme is not None:
+                    ctr_trme_map[idno] = ctr_trme
+                batch_ok += 1
+        else:
+            # 순차 실행
+            for idno in idnos:
+                idno, result, ctr_trme, err = _compute_one(idno)
+                if err:
+                    batch_err += 1
+                    if batch_err <= 3 and err not in ("no_info", "no_steps"):
+                        logger.warning(f"ERR IDNO={idno}: {err}")
+                    continue
+                batch_results[idno] = result
+                if ctr_trme is not None:
+                    ctr_trme_map[idno] = ctr_trme
+                batch_ok += 1
 
         # 인라인 netting: CTR_POLNO별 SOFF_AF 상계
         polno_sub = {}

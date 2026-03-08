@@ -45,6 +45,7 @@ class TradPVDataCache:
         self._load_dc_rt(conn)
         self._load_loan_tables(conn)
         self._load_prod_loan_tpcd(conn)
+        self._load_ltrmnat(conn)
         elapsed = time.time() - t0
         logger.info(f"TradPVDataCache loaded in {elapsed:.2f}s "
                      f"(infrc={len(self.infrc)}, bas={len(self.rsvamt_bas)})")
@@ -302,6 +303,40 @@ class TradPVDataCache:
                 "loan_rpay_rt": rr[6] or 0.0, "loan_max_limt_rt": rr[7] or 0.0,
             }
 
+    # --- IP_P_LTRMNAT (환급금 비율) ---
+    def _load_ltrmnat(self, conn):
+        """IP_P_LTRMNAT: SOFF/LTRMNAT 환급금 비율 로드.
+
+        키: (PROD_CD, CLS_CD, CTR_TPCD, PAY_STCD)
+        값: TMRFND_RT[1~20] (경과년별 비율)
+        """
+        self.ltrmnat = {}  # (prod, cls, tpcd, pay_stcd) -> np.ndarray[20]
+        rt_cols = ", ".join(f"TMRFND_RT{i}" for i in range(1, 21))
+        rows = conn.execute(f"""
+            SELECT PROD_CD, CLS_CD, CTR_TPCD, PAY_STCD, {rt_cols}
+            FROM IP_P_LTRMNAT
+            WHERE CTR_TPCD_YN = 1
+        """).fetchall()
+        for r in rows:
+            cls = str(r[1]).zfill(2) if r[1] else "01"
+            tpcd = str(r[2]) if r[2] is not None else ""
+            pay_stcd = r[3] or 1
+            rates = np.array([r[4 + i] or 0.0 for i in range(20)], dtype=np.float64)
+            self.ltrmnat[(r[0], cls, tpcd, pay_stcd)] = rates
+
+    def get_soff_rate(self, prod_cd, cls_cd, ctr_tpcd, pay_stcd_effective):
+        """SOFF 환급금 비율 조회.
+
+        Args:
+            prod_cd, cls_cd: 상품/종
+            ctr_tpcd: CTR_TPCD (str)
+            pay_stcd_effective: 1=납입기간 내, 2=납입기간 후
+
+        Returns:
+            np.ndarray[20] (경과년별 비율) or None (미등록 → 기본 1.0)
+        """
+        return self.ltrmnat.get((prod_cd, cls_cd, ctr_tpcd, pay_stcd_effective))
+
     # --- IP_P_PROD (CTR_LOAN_TPCD) ---
     def _load_prod_loan_tpcd(self, conn):
         self.prod_loan_tpcd = {}
@@ -344,6 +379,11 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
 
     loan_params = cache.get_loan_params(prod_cd, cls_cd, raw.get("assm_div_val1", ""))
     ctr_loan_tpcd = cache.prod_loan_tpcd.get((prod_cd, cls_cd), 1)
+
+    # SOFF 비율 (IP_P_LTRMNAT)
+    ctr_tpcd_str = raw["ctr_tpcd"]
+    soff_rates_paying = cache.get_soff_rate(prod_cd, cls_cd, ctr_tpcd_str, 1)
+    soff_rates_paidup = cache.get_soff_rate(prod_cd, cls_cd, ctr_tpcd_str, 2)
 
     acum_nprem_nobas = 0.0
     acum_nprem_old = 0.0
@@ -418,6 +458,8 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
         acum_cov=acum_cov, expct_inrt_data=expct_inrt_data,
         pubano_params=pubano_params, dc_rt_curve=dc_rt_curve,
         loan_params=loan_params,
+        soff_rates_paying=soff_rates_paying,
+        soff_rates_paidup=soff_rates_paidup,
     )
 
 
