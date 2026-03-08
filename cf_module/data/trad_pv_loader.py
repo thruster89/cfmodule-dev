@@ -1,19 +1,24 @@
 """
 OD_TRAD_PV 산출에 필요한 DB 데이터 로딩 모듈.
 
-Legacy SQLite DB (VSOLN.vdb)에서 계약/준비금/사업비 정보를 로드한다.
+DuckDB (duckdb_transform.duckdb) 또는 Legacy SQLite DB에서
+계약/준비금/사업비 정보를 로드한다.
 """
 
 import sqlite3
 import time
-from typing import Optional
+from typing import Optional, Union
 
+import duckdb
 import numpy as np
 
 from cf_module.calc.trad_pv import ContractInfo
 from cf_module.utils.logger import get_logger
 
 logger = get_logger("trad_pv_loader")
+
+# DuckDB / SQLite 공통 타입
+DBConn = Union[duckdb.DuckDBPyConnection, sqlite3.Connection]
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,7 @@ class TradPVDataCache:
         info = build_contract_info_cached(cache, idno)
     """
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: DBConn):
         t0 = time.time()
         self._load_infrc(conn)
         self._load_rsvamt_bas(conn)
@@ -39,6 +44,8 @@ class TradPVDataCache:
         self._load_pubano_inrt(conn)
         self._load_dc_rt(conn)
         self._load_loan_tables(conn)
+        self._load_prod_loan_tpcd(conn)
+        self._load_ltrmnat(conn)
         elapsed = time.time() - t0
         logger.info(f"TradPVDataCache loaded in {elapsed:.2f}s "
                      f"(infrc={len(self.infrc)}, bas={len(self.rsvamt_bas)})")
@@ -53,7 +60,7 @@ class TradPVDataCache:
                    ACCMPT_GPREM, ACCMPT_RSPB_RSVAMT, TOT_TRMNAT_DDCT_AMT,
                    PAYPR_DVCD, ETC_EXPCT_BIZEXP_KEY_VAL,
                    ASSM_DIV_VAL1, CTR_LOAN_REMAMT,
-                   INSTRM_DVCD, RENW_STCD, PAYCYC_DVCD
+                   INSTRM_DVCD, RENW_STCD, PAYCYC_DVCD, CTR_POLNO
             FROM II_INFRC WHERE INFRC_SEQ = 1
         """).fetchall()
         for r in rows:
@@ -78,25 +85,31 @@ class TradPVDataCache:
                 "instrm_dvcd": r[20] or "",
                 "renw_stcd": r[21] or 0,
                 "paycyc_dvcd": r[22] or 0,
+                "ctr_polno": r[23] or "",
             }
+        # CTR_POLNO → IDNO 리스트 역매핑
+        self.polno_to_idnos = {}
+        for idno, v in self.infrc.items():
+            polno = v["ctr_polno"]
+            if polno:
+                self.polno_to_idnos.setdefault(polno, []).append(idno)
 
     # --- II_RSVAMT_BAS ---
     def _load_rsvamt_bas(self, conn):
         self.rsvamt_bas = {}
-        cols = [c[1] for c in conn.execute("PRAGMA table_info(II_RSVAMT_BAS)").fetchall()]
-        rows = conn.execute("SELECT * FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1").fetchall()
-        idno_idx = cols.index("INFRC_IDNO")
-        crit_idx = cols.index("CRIT_JOIN_AMT")
-        nprem_idx = cols.index("NPREM")
+        ystr_cols = ", ".join(f"YSTR_RSVAMT{yr}" for yr in range(1, 121))
+        yyend_cols = ", ".join(f"YYEND_RSVAMT{yr}" for yr in range(1, 121))
+        sql = (f"SELECT INFRC_IDNO, CRIT_JOIN_AMT, NPREM, "
+               f"{ystr_cols}, {yyend_cols} "
+               f"FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1")
+        rows = conn.execute(sql).fetchall()
         for r in rows:
-            data = dict(zip(cols, r))
-            ystr = np.array([data.get(f"YSTR_RSVAMT{yr}", 0) or 0 for yr in range(1, 121)],
-                            dtype=np.float64)
-            yyend = np.array([data.get(f"YYEND_RSVAMT{yr}", 0) or 0 for yr in range(1, 121)],
-                             dtype=np.float64)
-            self.rsvamt_bas[r[idno_idx]] = {
-                "crit_join_amt": r[crit_idx],
-                "nprem": r[nprem_idx],
+            idno = r[0]
+            ystr = np.array([r[3 + i] or 0 for i in range(120)], dtype=np.float64)
+            yyend = np.array([r[123 + i] or 0 for i in range(120)], dtype=np.float64)
+            self.rsvamt_bas[idno] = {
+                "crit_join_amt": r[1],
+                "nprem": r[2],
                 "ystr": ystr, "yyend": yyend,
             }
 
@@ -290,6 +303,51 @@ class TradPVDataCache:
                 "loan_rpay_rt": rr[6] or 0.0, "loan_max_limt_rt": rr[7] or 0.0,
             }
 
+    # --- IP_P_LTRMNAT (환급금 비율) ---
+    def _load_ltrmnat(self, conn):
+        """IP_P_LTRMNAT: SOFF/LTRMNAT 환급금 비율 로드.
+
+        키: (PROD_CD, CLS_CD, CTR_TPCD, PAY_STCD)
+        값: TMRFND_RT[1~20] (경과년별 비율)
+        """
+        self.ltrmnat = {}  # (prod, cls, tpcd, pay_stcd) -> np.ndarray[20]
+        rt_cols = ", ".join(f"TMRFND_RT{i}" for i in range(1, 21))
+        rows = conn.execute(f"""
+            SELECT PROD_CD, CLS_CD, CTR_TPCD, PAY_STCD, {rt_cols}
+            FROM IP_P_LTRMNAT
+            WHERE CTR_TPCD_YN = 1
+        """).fetchall()
+        for r in rows:
+            cls = str(r[1]).zfill(2) if r[1] else "01"
+            tpcd = str(r[2]) if r[2] is not None else ""
+            pay_stcd = r[3] or 1
+            rates = np.array([r[4 + i] or 0.0 for i in range(20)], dtype=np.float64)
+            self.ltrmnat[(r[0], cls, tpcd, pay_stcd)] = rates
+
+    def get_soff_rate(self, prod_cd, cls_cd, ctr_tpcd, pay_stcd_effective):
+        """SOFF 환급금 비율 조회.
+
+        Args:
+            prod_cd, cls_cd: 상품/종
+            ctr_tpcd: CTR_TPCD (str)
+            pay_stcd_effective: 1=납입기간 내, 2=납입기간 후
+
+        Returns:
+            np.ndarray[20] (경과년별 비율) or None (미등록 → 기본 1.0)
+        """
+        return self.ltrmnat.get((prod_cd, cls_cd, ctr_tpcd, pay_stcd_effective))
+
+    # --- IP_P_PROD (CTR_LOAN_TPCD) ---
+    def _load_prod_loan_tpcd(self, conn):
+        self.prod_loan_tpcd = {}
+        rows = conn.execute("""
+            SELECT PROD_CD, CLS_CD, CTR_LOAN_TPCD
+            FROM IP_P_PROD
+        """).fetchall()
+        for r in rows:
+            cls = str(r[1]).zfill(2) if r[1] else "01"
+            self.prod_loan_tpcd[(r[0], cls)] = r[2] if r[2] is not None else 1
+
     def get_loan_params(self, prod_cd, cls_cd, assm_div_val1):
         grp = self.prod_grp.get((prod_cd, cls_cd))
         if not grp:
@@ -320,6 +378,12 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
         dc_rt_curve = cache.dc_rt_curve
 
     loan_params = cache.get_loan_params(prod_cd, cls_cd, raw.get("assm_div_val1", ""))
+    ctr_loan_tpcd = cache.prod_loan_tpcd.get((prod_cd, cls_cd), 1)
+
+    # SOFF 비율 (IP_P_LTRMNAT)
+    ctr_tpcd_str = raw["ctr_tpcd"]
+    soff_rates_paying = cache.get_soff_rate(prod_cd, cls_cd, ctr_tpcd_str, 1)
+    soff_rates_paidup = cache.get_soff_rate(prod_cd, cls_cd, ctr_tpcd_str, 2)
 
     acum_nprem_nobas = 0.0
     acum_nprem_old = 0.0
@@ -390,9 +454,12 @@ def build_contract_info_cached(cache: TradPVDataCache, idno: int) -> Optional[Co
         amort_mm=amort_mm,
         accmpt_rspb_rsvamt=raw["accmpt_rspb_rsvamt"],
         ctr_loan_remamt=raw["ctr_loan_remamt"],
+        ctr_loan_tpcd=ctr_loan_tpcd,
         acum_cov=acum_cov, expct_inrt_data=expct_inrt_data,
         pubano_params=pubano_params, dc_rt_curve=dc_rt_curve,
         loan_params=loan_params,
+        soff_rates_paying=soff_rates_paying,
+        soff_rates_paidup=soff_rates_paidup,
     )
 
 

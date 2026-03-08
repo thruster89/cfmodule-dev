@@ -75,7 +75,11 @@ class ContractInfo:
     pubano_params: Optional[dict] = None   # IE_PUBANO_INRT 파라미터
     dc_rt_curve: Optional[np.ndarray] = None  # IE_DC_RT 할인율 커브
     ctr_loan_remamt: float = 0.0           # II_INFRC.CTR_LOAN_REMAMT (초기 대출잔액)
+    ctr_loan_tpcd: int = 1                # IP_P_PROD.CTR_LOAN_TPCD (0=대출불가)
     loan_params: Optional[dict] = None    # IA_A_CTR_LOAN 약관대출 가정
+    # IP_P_LTRMNAT: SOFF 비율 (경과년 1~20, PAY_STCD별)
+    soff_rates_paying: Optional[np.ndarray] = None    # PAY_STCD=1 (납입기간)
+    soff_rates_paidup: Optional[np.ndarray] = None    # PAY_STCD=2 (납입후)
 
 
 @dataclass
@@ -161,8 +165,8 @@ class TradPVResult:
             "PAY_GRCPR_ACQSEXP": self.pay_grcpr_acqsexp,
             "YSTR_RSVAMT": self.ystr_rsvamt,
             "YYEND_RSVAMT": self.yyend_rsvamt,
-            "YSTR_RSVAMT_TRM": self.ystr_rsvamt.copy(),
-            "YYEND_RSVAMT_TRM": self.yyend_rsvamt.copy(),
+            "YSTR_RSVAMT_TRM": self.ystr_rsvamt,
+            "YYEND_RSVAMT_TRM": self.yyend_rsvamt,
             "PENS_INRT": self.pens_inrt,
             "PENS_DEFRY_RT": self.pens_defry_rt,
             "PENS_ANNUAL_SUM": self.pens_annual_sum,
@@ -190,7 +194,7 @@ class TradPVResult:
 
 
 # ---------------------------------------------------------------------------
-# STEP 3: 보험료 산출
+# STEP 1: 보험료 산출
 # ---------------------------------------------------------------------------
 
 def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
@@ -230,15 +234,12 @@ def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
     else:
         nprem_val = info.acum_nprem_nobas
         nprem_old = info.acum_nprem_old if info.acum_nprem_old else nprem_val
-        # CTR_MM <= amort_mm: old NPREM, 이후: new NPREM
-        acum_nprem = np.empty(n_steps, dtype=np.float64)
+        # CTR_MM <= amort_mm: old NPREM, 이후: new NPREM (벡터화)
         amort_mm = info.amort_mm
-        for t in range(n_steps):
-            cm = int(ctr_mm[t])
-            if amort_mm > 0 and cm <= amort_mm:
-                acum_nprem[t] = prem_pay_yn[t] * nprem_old
-            else:
-                acum_nprem[t] = prem_pay_yn[t] * nprem_val
+        if amort_mm > 0 and nprem_old != nprem_val:
+            acum_nprem = np.where(ctr_mm <= amort_mm, nprem_old, nprem_val) * prem_pay_yn
+        else:
+            acum_nprem = np.full(n_steps, nprem_val, dtype=np.float64) * prem_pay_yn
 
     # 기납입보험료 (누적)
     pad_prem = np.empty(n_steps, dtype=np.float64)
@@ -270,12 +271,14 @@ def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# STEP 4-5: 급부/사업비 → 적립금 (ACUM)
+# STEP 4: 적립금 (ACUM)
 # ---------------------------------------------------------------------------
 
 def _calc_accumulation(info: ContractInfo, n_steps: int,
                        ctr_mm: np.ndarray, prem_pay_yn: np.ndarray,
                        nprem_val: float,
+                       pubano_inrt: np.ndarray,
+                       lwst_grnt_inrt: np.ndarray,
                        pay_trmo: Optional[np.ndarray] = None,
                        ctr_trmo: Optional[np.ndarray] = None) -> dict:
     """적립금(APLY_PREM_ACUMAMT_BNFT) 산출.
@@ -283,7 +286,8 @@ def _calc_accumulation(info: ContractInfo, n_steps: int,
     BAS 보유: 연시/연말 선형보간
     BAS 미보유: 이율 기반 부리 (PAY_TRMO/CTR_TRMO 비율 보정)
 
-    Returns dict with: ystr_rsvamt, yyend_rsvamt, aply_prem_acumamt_bnft, nobas_extra
+    Returns dict with: ystr_rsvamt, yyend_rsvamt, aply_prem_acumamt_bnft,
+                       aply_adint_tgt_amt, lwst_adint_tgt_amt, lwst_prem_acumamt
     """
     has_bas = info.bas is not None
     mult = (info.join_amt / info.bas["crit_join_amt"]
@@ -293,63 +297,60 @@ def _calc_accumulation(info: ContractInfo, n_steps: int,
     yyend_rsvamt = np.zeros(n_steps, dtype=np.float64)
     aply_prem_acumamt_bnft = np.zeros(n_steps, dtype=np.float64)
 
-    # BAS 미보유: 이율 기반 ACUM (pubano_inrt_arr 필요)
+    aply_adint_tgt_amt = np.zeros(n_steps, dtype=np.float64)
+    lwst_adint_tgt_amt = np.zeros(n_steps, dtype=np.float64)
+    lwst_prem_acumamt = np.zeros(n_steps, dtype=np.float64)
+
+    # BAS 미보유: 이율 기반 ACUM
     acum_nobas = None
-    nobas_extra = None
     if not has_bas and info.acum_cov and info.accmpt_rspb_rsvamt:
         elapsed = info.pass_yy * 12 + info.pass_mm
         pterm_mm = info.pterm_yy * 12
 
-        # PUBANO_INRT / LWST_GRNT_INRT 배열 사전 산출
-        lwst_arr = _build_lwst_grnt_inrt_arr(info, n_steps)
-        pubano_arr = _build_pubano_inrt_arr(info, n_steps)
         # LWST=0인 시점은 최저보증 없음 → PUBANO 그대로 사용
-        lwst_for_acum = np.where(lwst_arr > 0, lwst_arr, pubano_arr)
+        lwst_for_acum = np.where(lwst_grnt_inrt > 0, lwst_grnt_inrt, pubano_inrt)
 
         acum_nobas, lwst_acum, adint_aply, adint_lwst = _compute_acum_interest_based(
             info.accmpt_rspb_rsvamt, nprem_val,
             lwst_for_acum, n_steps,
             elapsed, pterm_mm, info.pay_stcd,
-            pubano_inrt_arr=pubano_arr,
+            pubano_inrt_arr=pubano_inrt,
             pay_trmo=pay_trmo,
             ctr_trmo=ctr_trmo,
             nprem_old=info.acum_nprem_old,
             amort_mm=info.amort_mm,
             prem_pay_yn=prem_pay_yn,
         )
-        nobas_extra = {
-            "adint_aply": adint_aply,
-            "adint_lwst": adint_lwst,
-            "lwst_acum": lwst_acum,
-            "pubano_arr": pubano_arr,
-        }
+        aply_adint_tgt_amt = adint_aply
+        lwst_adint_tgt_amt = adint_lwst
+        lwst_prem_acumamt = lwst_acum
 
-    for t in range(n_steps):
-        cm = int(ctr_mm[t])
-        ins_year = (cm - 1) // 12 + 1
-        month_in_year = cm - (ins_year - 1) * 12
-
-        if has_bas:
-            yr_idx = ins_year - 1
-            if yr_idx < 120:
-                ystr_v = info.bas["ystr"][yr_idx] * mult
-                yyend_v = info.bas["yyend"][yr_idx] * mult
-            else:
-                ystr_v = 0.0
-                yyend_v = 0.0
-            ystr_rsvamt[t] = ystr_v
-            yyend_rsvamt[t] = yyend_v
-            interp = ystr_v + (yyend_v - ystr_v) * month_in_year / 12
-        else:
-            interp = acum_nobas[t] if acum_nobas is not None else 0.0
-
-        aply_prem_acumamt_bnft[t] = interp
+    if has_bas:
+        # BAS 경로 벡터화
+        cm_int = ctr_mm.astype(np.int64)
+        ins_year = (cm_int - 1) // 12 + 1
+        month_in_year = cm_int - (ins_year - 1) * 12
+        yr_idx = ins_year - 1
+        valid = yr_idx < 120
+        # 범위 초과 방지용 클리핑
+        safe_idx = np.minimum(yr_idx, 119)
+        bas_ystr = np.array(info.bas["ystr"], dtype=np.float64)
+        bas_yyend = np.array(info.bas["yyend"], dtype=np.float64)
+        ystr_rsvamt[:] = np.where(valid, bas_ystr[safe_idx] * mult, 0.0)
+        yyend_rsvamt[:] = np.where(valid, bas_yyend[safe_idx] * mult, 0.0)
+        aply_prem_acumamt_bnft[:] = ystr_rsvamt + (yyend_rsvamt - ystr_rsvamt) * month_in_year / 12
+    else:
+        if acum_nobas is not None:
+            aply_prem_acumamt_bnft[:] = acum_nobas
+        # else: 이미 0으로 초기화됨
 
     return {
         "ystr_rsvamt": ystr_rsvamt,
         "yyend_rsvamt": yyend_rsvamt,
         "aply_prem_acumamt_bnft": aply_prem_acumamt_bnft,
-        "nobas_extra": nobas_extra,
+        "aply_adint_tgt_amt": aply_adint_tgt_amt,
+        "lwst_adint_tgt_amt": lwst_adint_tgt_amt,
+        "lwst_prem_acumamt": lwst_prem_acumamt,
     }
 
 
@@ -371,16 +372,17 @@ def _build_lwst_grnt_inrt_arr(info: ContractInfo, n_steps: int) -> np.ndarray:
         # 단일률
         arr[:] = lwst1
     else:
-        # 경과년수 기반 변동
+        # 경과년수 기반 변동 (벡터화)
         elapsed_mm = info.pass_yy * 12 + info.pass_mm
-        for t in range(n_steps):
-            ctr_yy = (elapsed_mm + t) // 12  # 경과년수
-            if yy1 > 0 and ctr_yy < yy1:
-                arr[t] = lwst1
-            elif yy2 > 0 and ctr_yy < yy2:
-                arr[t] = lwst2
-            else:
-                arr[t] = lwst3 if lwst3 else lwst2
+        ctr_yy = (elapsed_mm + np.arange(n_steps)) // 12
+        lwst3_val = lwst3 if lwst3 else lwst2
+        if yy1 > 0 and yy2 > 0:
+            arr[:] = np.where(ctr_yy < yy1, lwst1,
+                              np.where(ctr_yy < yy2, lwst2, lwst3_val))
+        elif yy1 > 0:
+            arr[:] = np.where(ctr_yy < yy1, lwst1, lwst3_val)
+        else:
+            arr[:] = lwst3_val
 
     return arr
 
@@ -393,6 +395,9 @@ def _build_pubano_inrt_arr(info: ContractInfo, n_steps: int) -> np.ndarray:
     """
     arr = np.zeros(n_steps, dtype=np.float64)
     if not info.acum_cov:
+        # acum_cov 없으면 EXPCT_INRT를 PUBANO로 사용 (CD='00' 취급)
+        if info.expct_inrt_data and info.expct_inrt_data.get("expct_inrt"):
+            arr[:] = info.expct_inrt_data["expct_inrt"]
         return arr
 
     lwst_arr = _build_lwst_grnt_inrt_arr(info, n_steps)
@@ -421,19 +426,18 @@ def _build_pubano_inrt_arr(info: ContractInfo, n_steps: int) -> np.ndarray:
     if s0_str is not None:
         arr[0] = float(s0_str)
 
-    # SETL>=1: DB 공식 (PASS_PRD_NO=t → dc_curve[t-1])
+    # SETL>=1: DB 공식 벡터화 (PASS_PRD_NO=t → dc_curve[t-1])
     n_dc = len(dc_curve)
-    for t in range(1, n_steps):
-        idx = min(t - 1, n_dc - 1) if n_dc > 0 else -1
-        if idx >= 0:
-            dc = dc_curve[idx]
-            arr[t] = (ew * ei + (dc - iv) * (1 - ew)) * adj
+    if n_dc > 0 and n_steps > 1:
+        indices = np.minimum(np.arange(n_steps - 1), n_dc - 1)
+        dc = dc_curve[indices]
+        arr[1:] = (ew * ei + (dc - iv) * (1 - ew)) * adj
 
     return np.maximum(arr, lwst_arr)
 
 
 # ---------------------------------------------------------------------------
-# STEP 5b: 미경과보험료 (PRPD)
+# STEP 2: 미경과보험료 (PRPD) — KICS 산출에 선행
 # ---------------------------------------------------------------------------
 
 def _calc_prpd_mmcnt(info: ContractInfo, n_steps: int,
@@ -472,7 +476,7 @@ def _calc_prpd_acum(info: ContractInfo, n_steps: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# STEP 6: 환급금 (SOFF / LTRMNAT)
+# STEP 5: 환급금 (SOFF / LTRMNAT)
 # ---------------------------------------------------------------------------
 
 def _calc_surrender(info: ContractInfo, n_steps: int,
@@ -480,48 +484,77 @@ def _calc_surrender(info: ContractInfo, n_steps: int,
                     aply_prem_acumamt_bnft: np.ndarray) -> dict:
     """환급금(SOFF, LTRMNAT) 산출.
 
+    SOFF 비율 결정:
+      1. IP_P_LTRMNAT 등록 시: (PROD_CD, CLS_CD, CTR_TPCD, PAY_STCD) 룩업
+         - PAY_STCD 판정: cm ≤ pterm_mm → 1(납입기간), else → 2(납입후)
+         - 비율: TMRFND_RT[ins_year] (경과년별, 현재 데이터는 상수)
+      2. 미등록 시: 기본 rate = 1.0
+
+    ACQSEXP 차감:
+      - SOFF_BF: DEDUCT_PRODS(PTERM>5) 또는 TPCD='0'(ACQSEXP>0), PAY_STCD≠3
+      - LTRMNAT: CTR_TPCD≠'9'이고 ACQSEXP>0이면 항상 적용
+
     Returns dict with: soff_bf_tmrfnd, soff_af_tmrfnd, ltrmnat_tmrfnd
     """
     prod_cd = info.prod_cd
     ctr_tpcd = str(info.ctr_tpcd)
-    cls_cd = str(info.cls_cd)
     acqsexp1_val = info.acqsexp1
+    pterm_mm = info.pterm_yy * 12
 
-    # ACQSEXP 차감 판정
-    apply_deduction = (
-        (prod_cd in SOFF_DEDUCT_PRODS and info.pterm_yy > 5)
-        or (ctr_tpcd == "0" and acqsexp1_val > 0)
-    )
+    # --- SOFF 비율 결정 (IP_P_LTRMNAT 기반) ---
+    has_ltrmnat_rates = (info.soff_rates_paying is not None
+                         or info.soff_rates_paidup is not None)
 
-    # SOFF 납입중 비율
-    is_tmrfnd_prod = prod_cd in ("LA0217Y",)
-    if ctr_tpcd == "3":
-        soff_pay_rate = 0.3
-    elif ctr_tpcd == "5":
-        soff_pay_rate = 0.5
-    elif is_tmrfnd_prod and ctr_tpcd == "1" and cls_cd in ("01", "02"):
-        soff_pay_rate = 0.0
+    if has_ltrmnat_rates:
+        # IP_P_LTRMNAT 기반: cm ≤ pterm_mm이면 PAY_STCD=1, 아니면 2
+        in_pay_period = (ctr_mm <= pterm_mm)  # 납입기간 판정 (PAY_STCD 아닌 기간 기반)
+
+        if info.soff_rates_paying is not None:
+            # 경과년 기반 비율 (현재 상수이지만 일반화)
+            ins_year = ((ctr_mm.astype(np.int64) - 1) // 12).clip(0, 19)
+            pay_rate = info.soff_rates_paying[ins_year]
+        else:
+            pay_rate = np.ones(n_steps, dtype=np.float64)  # 미등록 → 1.0
+
+        if info.soff_rates_paidup is not None:
+            ins_year_pu = ((ctr_mm.astype(np.int64) - 1) // 12).clip(0, 19)
+            paidup_rate = info.soff_rates_paidup[ins_year_pu]
+        else:
+            paidup_rate = np.ones(n_steps, dtype=np.float64)  # 미등록 → 1.0
+
+        rate = np.where(in_pay_period, pay_rate, paidup_rate)
     else:
-        soff_pay_rate = 1.0
+        # IP_P_LTRMNAT 미등록: 기본 rate = 1.0
+        rate = np.ones(n_steps, dtype=np.float64)
 
-    soff_bf_tmrfnd = np.zeros(n_steps, dtype=np.float64)
-    for t in range(n_steps):
-        cm = int(ctr_mm[t])
-        rate = soff_pay_rate if prem_pay_yn[t] > 0 else 1.0
-        soff_val = aply_prem_acumamt_bnft[t] * rate
-        if apply_deduction:
-            remaining_84 = max(84 - cm, 0)
-            soff_val -= acqsexp1_val * remaining_84 / 84
-        soff_bf_tmrfnd[t] = soff_val
+    # SOFF_BF = ACUM × rate
+    soff_bf_tmrfnd = aply_prem_acumamt_bnft * rate
 
+    # SOFF ACQSEXP 차감 (PAY_STCD=3 납입면제 시 미적용)
+    apply_soff_deduction = (
+        info.pay_stcd != 3
+        and (
+            (prod_cd in SOFF_DEDUCT_PRODS and info.pterm_yy > 5)
+            or (ctr_tpcd == "0" and acqsexp1_val > 0)
+        )
+    )
+    if apply_soff_deduction:
+        remaining_84 = np.maximum(84 - ctr_mm, 0)
+        soff_bf_tmrfnd = soff_bf_tmrfnd - acqsexp1_val * remaining_84 / 84
+
+    # soff_af는 netting에서 수정될 수 있으므로 반드시 복사
     soff_af_tmrfnd = soff_bf_tmrfnd.copy()
 
-    # LTRMNAT: CTR_TPCD='9' → 0, else → max(0, ACUM - deduction)
+    # --- LTRMNAT ---
+    # CTR_TPCD='9' → 0
+    # else → max(0, ACUM - ACQSEXP×max(84-CM,0)/84) (PAY_STCD≠3이고 ACQSEXP>0)
     if ctr_tpcd == "9":
         ltrmnat_tmrfnd = np.zeros(n_steps, dtype=np.float64)
-    else:
+    elif acqsexp1_val > 0 and info.pay_stcd != 3:
         deduction = acqsexp1_val * np.maximum(84 - ctr_mm, 0) / 84
         ltrmnat_tmrfnd = np.maximum(0, aply_prem_acumamt_bnft - deduction)
+    else:
+        ltrmnat_tmrfnd = np.maximum(0, aply_prem_acumamt_bnft)
 
     return {
         "soff_bf_tmrfnd": soff_bf_tmrfnd,
@@ -531,56 +564,10 @@ def _calc_surrender(info: ContractInfo, n_steps: int,
 
 
 # ---------------------------------------------------------------------------
-# STEP 7: 이율 / 할인 (Phase 2 — 미구현)
-# ---------------------------------------------------------------------------
-
-def _calc_interest(info: ContractInfo, n_steps: int,
-                   ctr_mm: np.ndarray,
-                   nobas_extra: Optional[dict] = None) -> dict:
-    """이율 관련 필드 산출.
-
-    APLY_PUBANO_INRT: IP_P_ACUM_COV 대상만 DB 공식 기반 계산.
-      공식: (EXT_WGHT*EXT_ITR + (DC_RT-IV_ADEXP_RT)*(1-EXT_WGHT)) * ADJ_RT
-      SETL=0: inrt_lookup.json 캐시 (현재 적용 이율)
-      SETL>=1: IE_PUBANO_INRT × IE_DC_RT 공식
-    IP_P_ACUM_COV 미대상: 0 (계산 스킵)
-    """
-    zeros = np.zeros(n_steps, dtype=np.float64)
-
-    # APLY_PUBANO_INRT: NoBAS에서 이미 산출된 배열 재활용, 아니면 새로 산출
-    if nobas_extra and "pubano_arr" in nobas_extra:
-        aply_pubano_inrt = nobas_extra["pubano_arr"]
-    else:
-        aply_pubano_inrt = _build_pubano_inrt_arr(info, n_steps)
-
-    # NoBAS: ADINT / LWST
-    if nobas_extra:
-        aply_adint_tgt_amt = nobas_extra["adint_aply"]
-        lwst_adint_tgt_amt = nobas_extra["adint_lwst"]
-        lwst_prem_acumamt = nobas_extra["lwst_acum"]
-    else:
-        aply_adint_tgt_amt = zeros.copy()
-        lwst_adint_tgt_amt = zeros.copy()
-        lwst_prem_acumamt = zeros.copy()
-
-    # KICS: compute_trad_pv에서 SOFF_AF × CTR_TRME로 산출
-    cncttp_acumamt_kics = zeros.copy()  # placeholder
-
-    return {
-        "aply_pubano_inrt": aply_pubano_inrt,
-        "aply_adint_tgt_amt": aply_adint_tgt_amt,
-        "lwst_adint_tgt_amt": lwst_adint_tgt_amt,
-        "lwst_prem_acumamt": lwst_prem_acumamt,
-        "cncttp_acumamt_kics": cncttp_acumamt_kics,
-    }
-
-
-# ---------------------------------------------------------------------------
-# STEP 7b: 약관대출 (LOAN)
+# STEP 7: 약관대출 (LOAN)
 # ---------------------------------------------------------------------------
 
 def _calc_loan(info: ContractInfo, n_steps: int,
-               cncttp_acumamt_kics: np.ndarray,
                aply_pubano_inrt: np.ndarray) -> dict:
     """약관대출 관련 필드 산출.
 
@@ -595,7 +582,8 @@ def _calc_loan(info: ContractInfo, n_steps: int,
     loan_rpay = np.zeros(n_steps, dtype=np.float64)
 
     rem0 = info.ctr_loan_remamt
-    if rem0 == 0 or n_steps < 2:
+    # CTR_LOAN_TPCD=0 (약관대출 불가 상품) → LOAN 미처리
+    if rem0 == 0 or n_steps < 2 or info.ctr_loan_tpcd == 0:
         return {"loan_int": loan_int, "loan_remamt": loan_remamt,
                 "loan_rpay_hafway": loan_rpay}
 
@@ -611,11 +599,9 @@ def _calc_loan(info: ContractInfo, n_steps: int,
 
 
 # ---------------------------------------------------------------------------
-# STEP 8: PV (Phase 3 — 미구현)
+# STEP 3: 이율 배열 (PUBANO_INRT / LWST_GRNT_INRT)
+# → _build_pubano_inrt_arr, _build_lwst_grnt_inrt_arr 는 상단에 정의
 # ---------------------------------------------------------------------------
-
-# PV 단계는 MN tpx, BN 급부금, 할인율과 결합하여 산출.
-# 현재는 개별 CF 항목만 산출하며, PV 합산은 상위 모듈에서 수행.
 
 
 # ---------------------------------------------------------------------------
@@ -625,8 +611,18 @@ def _calc_loan(info: ContractInfo, n_steps: int,
 def compute_trad_pv(info: ContractInfo, n_steps: int,
                     pay_trmo: Optional[np.ndarray] = None,
                     ctr_trmo: Optional[np.ndarray] = None,
-                    ctr_trme: Optional[np.ndarray] = None) -> TradPVResult:
+                    ctr_trme: Optional[np.ndarray] = None,
+                    fast_mode: bool = False) -> TradPVResult:
     """단건 OD_TRAD_PV 전체 산출.
+
+    계산 흐름 (의존성 순서):
+      STEP 1: 보험료 (시간축, 납입여부, 원수/할인/적립보험료)
+      STEP 2: 미경과보험료 PRPD (KICS 산출에 선행)
+      STEP 3: 이율 배열 (적립금 부리에 선행)
+      STEP 4: 적립금 (BAS 보간 / NoBAS 이율부리)
+      STEP 5: 환급금 (SOFF_BF, SOFF_AF, LTRMNAT)
+      STEP 6: KICS = (SOFF_AF + PRPD_PREM) × CTR_TRME
+      STEP 7: 약관대출
 
     Args:
         info: 계약 정보 (ContractInfo)
@@ -634,97 +630,104 @@ def compute_trad_pv(info: ContractInfo, n_steps: int,
         pay_trmo: PAY_TRMO_MTNPSN_CNT 배열 (NoBAS ADINT 비율 보정용)
         ctr_trmo: CTR_TRMO_MTNPSN_CNT 배열
         ctr_trme: CTR_TRME_MTNPSN_CNT 배열 (KICS 산출용)
-
-    Returns:
-        TradPVResult
+        fast_mode: True=성능 우선 (배열 공유, 결과 읽기전용 취급)
     """
+    # 공유 제로 배열: fast_mode에서는 단일 인스턴스 참조 공유
     zeros = np.zeros(n_steps, dtype=np.float64)
 
-    # STEP 3: 보험료
+    # STEP 1: 보험료
     prem = _calc_premium(info, n_steps)
+    ctr_mm = prem["ctr_mm"]
+    prem_pay_yn = prem["prem_pay_yn"]
 
-    # STEP 4-5: 적립금
+    # STEP 2: 미경과보험료 (PRPD) — KICS에 선행
+    prpd_mmcnt = _calc_prpd_mmcnt(info, n_steps, ctr_mm, prem_pay_yn)
+    prpd_prem = _calc_prpd_prem(info, n_steps, ctr_mm, prem_pay_yn, prem["orig_prem"])
+    acum_nprem_prpd = _calc_prpd_acum(info, n_steps)
+
+    # STEP 3: 이율 배열 — 적립금 부리에 선행
+    pubano_inrt = _build_pubano_inrt_arr(info, n_steps)
+    lwst_grnt_inrt = _build_lwst_grnt_inrt_arr(info, n_steps)
+
+    # STEP 4: 적립금
     acum = _calc_accumulation(
-        info, n_steps,
-        prem["ctr_mm"], prem["prem_pay_yn"], prem["nprem_val"],
+        info, n_steps, ctr_mm, prem_pay_yn, prem["nprem_val"],
+        pubano_inrt=pubano_inrt, lwst_grnt_inrt=lwst_grnt_inrt,
         pay_trmo=pay_trmo, ctr_trmo=ctr_trmo,
     )
 
-    # STEP 6: 환급금
-    surr = _calc_surrender(
-        info, n_steps,
-        prem["ctr_mm"], prem["prem_pay_yn"],
-        acum["aply_prem_acumamt_bnft"],
-    )
+    # STEP 5: 환급금
+    surr = _calc_surrender(info, n_steps, ctr_mm, prem_pay_yn,
+                           acum["aply_prem_acumamt_bnft"])
 
-    # STEP 7: 이율
-    inrt = _calc_interest(info, n_steps, prem["ctr_mm"],
-                          nobas_extra=acum.get("nobas_extra"))
-
-    # KICS = SOFF_AF_TMRFND × CTR_TRME
+    # STEP 6: KICS = (SOFF_AF + PRPD_PREM) × CTR_TRME
     if ctr_trme is not None:
-        cncttp_kics = surr["soff_af_tmrfnd"] * ctr_trme[:n_steps]
+        cncttp_kics = (surr["soff_af_tmrfnd"] + prpd_prem) * ctr_trme[:n_steps]
     else:
-        cncttp_kics = inrt["cncttp_acumamt_kics"]
+        cncttp_kics = zeros if fast_mode else zeros.copy()
 
-    # LOAN
-    loan = _calc_loan(info, n_steps, cncttp_kics, inrt["aply_pubano_inrt"])
+    # STEP 7: 약관대출
+    loan = _calc_loan(info, n_steps, pubano_inrt)
+
+    # fast_mode: 배열 복사 생략 (읽기전용 취급, 16개 zero copy + 2개 데이터 copy 절약)
+    acumamt_bnft = acum["aply_prem_acumamt_bnft"]
 
     return TradPVResult(
         n_steps=n_steps,
-        # 보험료
-        ctr_mm=prem["ctr_mm"],
-        prem_pay_yn=prem["prem_pay_yn"],
+        # STEP 1: 보험료
+        ctr_mm=ctr_mm,
+        prem_pay_yn=prem_pay_yn,
         orig_prem=prem["orig_prem"],
         dc_prem=prem["dc_prem"],
         acum_nprem=prem["acum_nprem"],
         pad_prem=prem["pad_prem"],
         acqsexp1_bizexp=prem["acqsexp1_bizexp"],
-        # 준비금
+        # STEP 2: 미경과보험료
+        acum_nprem_prpd=acum_nprem_prpd,
+        prpd_mmcnt=prpd_mmcnt,
+        prpd_prem=prpd_prem,
+        # STEP 3: 이율
+        aply_pubano_inrt=pubano_inrt,
+        # STEP 4: 적립금
         ystr_rsvamt=acum["ystr_rsvamt"],
         yyend_rsvamt=acum["yyend_rsvamt"],
-        # 적립금
-        aply_prem_acumamt_bnft=acum["aply_prem_acumamt_bnft"],
-        aply_prem_acumamt_exp=acum["aply_prem_acumamt_bnft"].copy(),
-        # 환급금
+        aply_prem_acumamt_bnft=acumamt_bnft,
+        aply_prem_acumamt_exp=acumamt_bnft if fast_mode else acumamt_bnft.copy(),
+        aply_adint_tgt_amt=acum["aply_adint_tgt_amt"],
+        lwst_adint_tgt_amt=acum["lwst_adint_tgt_amt"],
+        lwst_prem_acumamt=acum["lwst_prem_acumamt"],
+        # STEP 5: 환급금
         soff_bf_tmrfnd=surr["soff_bf_tmrfnd"],
         soff_af_tmrfnd=surr["soff_af_tmrfnd"],
         ltrmnat_tmrfnd=surr["ltrmnat_tmrfnd"],
-        # 이율
-        aply_pubano_inrt=inrt["aply_pubano_inrt"],
-        aply_adint_tgt_amt=inrt["aply_adint_tgt_amt"],
-        lwst_adint_tgt_amt=inrt["lwst_adint_tgt_amt"],
-        lwst_prem_acumamt=inrt["lwst_prem_acumamt"],
+        # STEP 6: KICS
         cncttp_acumamt_kics=cncttp_kics,
-        # 약관대출
+        # STEP 7: 약관대출
         loan_int=loan["loan_int"],
         loan_remamt=loan["loan_remamt"],
         loan_rpay_hafway=loan["loan_rpay_hafway"],
-        # PRPD (미경과보험료)
-        acum_nprem_prpd=_calc_prpd_acum(info, n_steps),
-        prpd_mmcnt=_calc_prpd_mmcnt(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"]),
-        prpd_prem=_calc_prpd_prem(info, n_steps, prem["ctr_mm"], prem["prem_pay_yn"], prem["orig_prem"]),
-        add_accmpt_gprem=zeros.copy(),
-        add_accmpt_nprem=zeros.copy(),
-        acqsexp2_bizexp=zeros.copy(),
-        afpay_mntexp=zeros.copy(),
-        lumpay_bizexp=zeros.copy(),
-        pay_grcpr_acqsexp=zeros.copy(),
-        pens_inrt=zeros.copy(),
-        pens_defry_rt=zeros.copy(),
-        pens_annual_sum=zeros.copy(),
-        hafway_wdamt=zeros.copy(),
-        hafway_wdamt_add=zeros.copy(),
-        soff_bf_tmrfnd_add=zeros.copy(),
-        soff_af_tmrfnd_add=zeros.copy(),
-        loan_new=zeros.copy(),
-        loan_rpay_matu=zeros.copy(),
-        matu_maint_bns_acum_amt=zeros.copy(),
+        # 0-컬럼 (미구현) — fast_mode: 단일 zeros 참조 공유
+        add_accmpt_gprem=zeros if fast_mode else zeros.copy(),
+        add_accmpt_nprem=zeros if fast_mode else zeros.copy(),
+        acqsexp2_bizexp=zeros if fast_mode else zeros.copy(),
+        afpay_mntexp=zeros if fast_mode else zeros.copy(),
+        lumpay_bizexp=zeros if fast_mode else zeros.copy(),
+        pay_grcpr_acqsexp=zeros if fast_mode else zeros.copy(),
+        pens_inrt=zeros if fast_mode else zeros.copy(),
+        pens_defry_rt=zeros if fast_mode else zeros.copy(),
+        pens_annual_sum=zeros if fast_mode else zeros.copy(),
+        hafway_wdamt=zeros if fast_mode else zeros.copy(),
+        hafway_wdamt_add=zeros if fast_mode else zeros.copy(),
+        soff_bf_tmrfnd_add=zeros if fast_mode else zeros.copy(),
+        soff_af_tmrfnd_add=zeros if fast_mode else zeros.copy(),
+        loan_new=zeros if fast_mode else zeros.copy(),
+        loan_rpay_matu=zeros if fast_mode else zeros.copy(),
+        matu_maint_bns_acum_amt=zeros if fast_mode else zeros.copy(),
     )
 
 
 # ---------------------------------------------------------------------------
-# 이율 기반 부리 (BAS 미보유 계약용)
+# STEP 4 내부: 이율 기반 부리 (BAS 미보유 계약용)
 # ---------------------------------------------------------------------------
 
 def _compute_acum_interest_based(
@@ -818,3 +821,60 @@ def _compute_acum_interest_based(
             lwst_acum[t] = adint_lwst + cum_int_lwst
 
     return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
+
+
+# ---------------------------------------------------------------------------
+# CTR_POLNO 단위 SOFF_AF netting (후처리)
+# ---------------------------------------------------------------------------
+
+def apply_soff_af_netting(
+    results: dict,
+    polno_to_idnos: dict,
+    ctr_trme_map: Optional[dict] = None,
+    idno_to_cov: Optional[dict] = None,
+) -> None:
+    """CTR_POLNO 그룹 내 SOFF_AF netting (in-place).
+
+    규칙 (시점 t에서 그룹 SOFF_BF 합 < 0일 때):
+      - 주계약(CLA00500): AF = 0 (그룹 합으로 상계)
+      - 특약: AF = max(0, BF) (개별 floor)
+    합 >= 0이면 전 계약 AF = BF (변동 없음).
+    CNCTTP_ACUMAMT_KICS도 재산출.
+
+    Args:
+        results: {idno: TradPVResult} — 개별 계산 완료된 결과
+        polno_to_idnos: {ctr_polno: [idno, ...]} — CTR_POLNO 역매핑
+        ctr_trme_map: {idno: np.ndarray} — CTR_TRME 배열 (KICS 재산출용)
+        idno_to_cov: {idno: cov_cd} — COV_CD 매핑 (주계약 식별용)
+    """
+    for polno, idno_list in polno_to_idnos.items():
+        group = [(i, results[i]) for i in idno_list if i in results]
+        if len(group) <= 1:
+            continue
+
+        max_t = max(r.n_steps for _, r in group)
+        # 시점별 SOFF_BF 합산
+        bf_sum = np.zeros(max_t, dtype=np.float64)
+        for _, r in group:
+            bf_sum[:r.n_steps] += r.soff_bf_tmrfnd
+
+        neg_mask = bf_sum < 0  # 합산 음수 시점
+
+        for idno, r in group:
+            n = r.n_steps
+            mask = neg_mask[:n]
+            if not np.any(mask):
+                continue
+
+            is_main = (idno_to_cov or {}).get(idno) == "CLA00500"
+            if is_main:
+                # 주계약: 합산 음수 시점 → AF = 0
+                r.soff_af_tmrfnd[mask] = 0.0
+            else:
+                # 특약: 합산 음수 시점 → AF = max(0, BF)
+                r.soff_af_tmrfnd[mask] = np.maximum(0.0, r.soff_bf_tmrfnd[mask])
+
+            # CNCTTP_ACUMAMT_KICS 재산출: (AF + PRPD_PREM) × TRME
+            if ctr_trme_map and idno in ctr_trme_map:
+                trme = ctr_trme_map[idno]
+                r.cncttp_acumamt_kics[:] = (r.soff_af_tmrfnd + r.prpd_prem) * trme[:n]

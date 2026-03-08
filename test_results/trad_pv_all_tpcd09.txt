@@ -1,0 +1,155 @@
+
+======================================================================
+OD_TRAD_PV 전체 검증: 28,211건 (TPCD 0,9), ALL_PASS=28,211, ERR=0
+총 소요: 116.5s
+======================================================================
+
+컬럼                                PASS    FAIL     max_diff
+------------------------------------------------------------
+CTR_AFT_PASS_MMCNT               28211       0       0.0000  PASS
+PREM_PAY_YN                      28211       0       0.0000  PASS
+ORIG_PREM                        28211       0       0.0000  PASS
+DC_PREM                          28211       0       0.0000  PASS
+ACUM_NPREM                       28211       0       0.0000  PASS
+ACUM_NPREM_PRPD                  28211       0       0.0000  PASS
+PRPD_MMCNT                       28211       0       0.0000  PASS
+PRPD_PREM                        28211       0       0.0000  PASS
+PAD_PREM                         28211       0       0.0000  PASS
+ADD_ACCMPT_GPREM                 28211       0       0.0000  PASS
+ADD_ACCMPT_NPREM                 28211       0       0.0000  PASS
+ACQSEXP1_BIZEXP                  28211       0       0.0000  PASS
+ACQSEXP2_BIZEXP                  28211       0       0.0000  PASS
+AFPAY_MNTEXP                     28211       0       0.0000  PASS
+LUMPAY_BIZEXP                    28211       0       0.0000  PASS
+PAY_GRCPR_ACQSEXP                28211       0       0.0000  PASS
+YSTR_RSVAMT                      28211       0       0.0000  PASS
+YYEND_RSVAMT                     28211       0       0.0000  PASS
+YSTR_RSVAMT_TRM                  28211       0       0.0000  PASS
+YYEND_RSVAMT_TRM                 28211       0       0.0000  PASS
+PENS_INRT                        28211       0       0.0000  PASS
+PENS_DEFRY_RT                    28211       0       0.0000  PASS
+PENS_ANNUAL_SUM                  28211       0       0.0000  PASS
+HAFWAY_WDAMT                     28211       0       0.0000  PASS
+APLY_PUBANO_INRT                 28211       0       0.0000  PASS
+APLY_ADINT_TGT_AMT               28211       0       0.0000  PASS
+APLY_PREM_ACUMAMT_BNFT           28211       0       0.0000  PASS
+APLY_PREM_ACUMAMT_EXP            28211       0       0.0000  PASS
+LWST_ADINT_TGT_AMT               28211       0       0.0000  PASS
+LWST_PREM_ACUMAMT                28211       0       0.0000  PASS
+SOFF_BF_TMRFND                   28211       0       0.0000  PASS
+SOFF_AF_TMRFND                   28211       0       0.0000  PASS
+LTRMNAT_TMRFND                   28211       0       0.0000  PASS
+HAFWAY_WDAMT_ADD                 28211       0       0.0000  PASS
+SOFF_BF_TMRFND_ADD               28211       0       0.0000  PASS
+SOFF_AF_TMRFND_ADD               28211       0       0.0000  PASS
+CNCTTP_ACUMAMT_KICS              28211       0       0.0000  PASS
+LOAN_INT                         28211       0       0.0000  PASS
+LOAN_REMAMT                      28211       0       0.0000  PASS
+LOAN_RPAY_HAFWAY                 28211       0       0.0000  PASS
+LOAN_NEW                         28211       0       0.0000  PASS
+LOAN_RPAY_MATU                   28211       0       0.0000  PASS
+MATU_MAINT_BNS_ACUM_AMT          28211       0       0.0000  PASS
+
+======================================================================
+(PROD_CD, CLS_CD)별 요약
+======================================================================
+PROD/CLS               건수     OK   FAIL
+----------------------------------------
+LA0201J/01           7856   7856      0  OK
+LA0217W/04           4587   4587      0  OK
+LA0203C/03           1636   1636      0  OK
+LA0201J/02           1378   1378      0  OK
+LA0217W/03           1144   1144      0  OK
+LA0217W/02            938    938      0  OK
+LA0216W/03            910    910      0  OK
+LA0217W/01            875    875      0  OK
+LA0201K/01            806    806      0  OK
+LA02117/01            672    672      0  OK
+LA02155/01            666    666      0  OK
+LA0201J/04            592    592      0  OK
+LA02158/01            550    550      0  OK
+LA02079/05            386    386      0  OK
+LA0201J/05            364    364      0  OK
+LA02079/01            351    351      0  OK
+LA0211R/01            330    330      0  OK
+LA02125/01            232    232      0  OK
+LA0213W/01            190    190      0  OK
+LA0216W/01            175    175      0  OK
+LA0203C/04            175    175      0  OK
+LA02079/03            162    162      0  OK
+LA0214W/03            160    160      0  OK
+LA0216W/04            154    154      0  OK
+LA02117/02            153    153      0  OK
+LA0214W/01            140    140      0  OK
+LA0217Y/01            131    131      0  OK
+LA0215W/03            120    120      0  OK
+LA0215W/01            112    112      0  OK
+LA02101/02            111    111      0  OK
+LA0201K/05            106    106      0  OK
+LA0211Z/01             98     98      0  OK
+LA0203C/02             98     98      0  OK
+LA02078/04             96     96      0  OK
+LA02028/04             88     88      0  OK
+LA0206F/02             84     84      0  OK
+LA02058/05             83     83      0  OK
+LA0201K/04             82     82      0  OK
+LA0201K/02             80     80      0  OK
+LA02079/04             72     72      0  OK
+LA0211R/02             66     66      0  OK
+LA02028/08             64     64      0  OK
+LA02028/05             60     60      0  OK
+LA02078/05             56     56      0  OK
+LA0213W/04             54     54      0  OK
+LA0211R/04             54     54      0  OK
+LA0205Z/02             54     54      0  OK
+LA0213W/02             44     44      0  OK
+LA0202H/01             36     36      0  OK
+LA02029/04             36     36      0  OK
+LA02058/03             36     36      0  OK
+LA02029/08             36     36      0  OK
+LA02078/01             35     35      0  OK
+LA0216W/02             35     35      0  OK
+LA0203F/01             34     34      0  OK
+LA0211R/03             33     33      0  OK
+LA0208U/02             32     32      0  OK
+LA02102/02             32     32      0  OK
+LA02107/02             30     30      0  OK
+LA02125/03             28     28      0  OK
+LA0203B/03             26     26      0  OK
+LA02058/07             24     24      0  OK
+LA0214W/04             22     22      0  OK
+LA0215W/04             22     22      0  OK
+LA0209U/02             22     22      0  OK
+LA02029/02             20     20      0  OK
+LA02059/04             20     20      0  OK
+LA02078/08             20     20      0  OK
+LA0215R/02             16     16      0  OK
+LA02028/01             15     15      0  OK
+LA02059/01             14     14      0  OK
+LA02058/01             14     14      0  OK
+LA02059/05             13     13      0  OK
+LA0202H/03             13     13      0  OK
+LA02079/08             12     12      0  OK
+LA02125/02             12     12      0  OK
+LA0216R/02             10     10      0  OK
+LA02113/01             10     10      0  OK
+LA0203J/01             10     10      0  OK
+LA0215X/01             10     10      0  OK
+LA02059/02              9      9      0  OK
+LA02078/06              9      9      0  OK
+LA02078/02              9      9      0  OK
+LA02120/02              9      9      0  OK
+LA0202H/02              8      8      0  OK
+LA0215W/02              7      7      0  OK
+LA02017/01              6      6      0  OK
+LA0206G/02              4      4      0  OK
+LA0203W/01              4      4      0  OK
+LA02059/08              4      4      0  OK
+LA0210U/02              4      4      0  OK
+LA0217Y/02              4      4      0  OK
+LA0212R/02              2      2      0  OK
+LA02109/02              2      2      0  OK
+LA0213R/02              2      2      0  OK
+LA0200Z/01              2      2      0  OK
+LA0214R/02              2      2      0  OK
+LA02113/02              1      1      0  OK

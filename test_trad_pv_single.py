@@ -6,13 +6,12 @@ Usage:
     python test_trad_pv_single.py --idno 625683 --cols APLY_ADINT_TGT_AMT,LWST_PREM_ACUMAMT
 """
 import argparse
-import sqlite3
 import duckdb
 import numpy as np
 from cf_module.calc.trad_pv import compute_trad_pv
-from cf_module.data.trad_pv_loader import (
-    build_contract_info, TradPVDataCache, build_contract_info_cached,
-)
+from cf_module.data.trad_pv_loader import TradPVDataCache, build_contract_info_cached
+
+DB_PATH = 'duckdb_transform.duckdb'
 
 
 def main():
@@ -24,23 +23,23 @@ def main():
     parser.add_argument("--head", type=int, default=20, help="detail 모드 출력 행수")
     args = parser.parse_args()
 
-    legacy = sqlite3.connect('VSOLN.vdb')
-    proj = duckdb.connect('proj_o.duckdb', read_only=True)
+    con = duckdb.connect(DB_PATH, read_only=True)
+    cache = TradPVDataCache(con)
 
     idno = args.idno
-    info = build_contract_info(legacy, idno)
+    info = build_contract_info_cached(cache, idno)
     if not info:
         print(f"IDNO={idno}: build_contract_info 실패")
         return
 
-    n_steps = proj.execute(
+    n_steps = con.execute(
         f'SELECT COUNT(*) FROM OD_TRAD_PV WHERE INFRC_IDNO={idno}'
     ).fetchone()[0]
     if n_steps == 0:
         print(f"IDNO={idno}: OD_TRAD_PV 데이터 없음")
         return
 
-    mn = proj.execute(
+    mn = con.execute(
         f'SELECT CTR_TRMO_MTNPSN_CNT, PAY_TRMO_MTNPSN_CNT, CTR_TRME_MTNPSN_CNT '
         f'FROM OD_TBL_MN WHERE INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
     ).fetchdf()
@@ -52,7 +51,7 @@ def main():
         ctr_trme=mn['CTR_TRME_MTNPSN_CNT'].values if len(mn) > 0 else None,
     )
     d = result.to_dict()
-    exp = proj.execute(
+    exp = con.execute(
         f'SELECT * FROM OD_TRAD_PV WHERE INFRC_IDNO={idno} ORDER BY SETL_AFT_PASS_MMCNT'
     ).fetchdf()
 
@@ -125,9 +124,7 @@ def main():
             print(f"{'t':>4s} {'CTR_MM':>7s} {'comp':>16s} {'exp':>16s} {'diff':>14s}")
             ctr_mm = d.get('CTR_AFT_PASS_MMCNT', np.arange(len(exp)))
 
-            # 차이 큰 순 또는 처음부터
             if np.max(diffs) > 1e-6:
-                # 차이 발생 시작점 근처 출력
                 first_fail = next((t for t in range(len(exp)) if diffs[t] > 1e-6), 0)
                 start = max(0, first_fail - 2)
                 for t in range(start, min(start + args.head, len(exp))):
@@ -139,8 +136,7 @@ def main():
                     cm = int(ctr_mm[t]) if t < len(ctr_mm) else 0
                     print(f"{t:>4d} {cm:>7d} {comp[t]:>16.4f} {exv[t]:>16.4f} {diffs[t]:>14.6f}")
 
-    legacy.close()
-    proj.close()
+    con.close()
 
 
 if __name__ == "__main__":
