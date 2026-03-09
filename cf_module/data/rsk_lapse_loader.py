@@ -54,6 +54,7 @@ class ContractInfo:
     ctr_dt: int
     assm_divs: List[str]   # ASSM_DIV_VAL1~15
     rsk_divs: List[str]    # RSK_RT_DIV_VAL1~10
+    main_pterm_yy: int = 0  # MAIN_PAYPR_YYCNT (주계약 납입기간)
 
 
 @dataclass
@@ -88,6 +89,7 @@ class RawAssumptionLoader:
             SELECT INFRC_IDNO, PROD_CD, CLS_CD, COV_CD,
                    ISRD_JOIN_AGE, INSTRM_YYCNT, PAYPR_YYCNT,
                    PASS_YYCNT, PASS_MMCNT, CLOS_YM, CTR_DT,
+                   MAIN_PAYPR_YYCNT,
                    ASSM_DIV_VAL1, ASSM_DIV_VAL2, ASSM_DIV_VAL3,
                    ASSM_DIV_VAL4, ASSM_DIV_VAL5, ASSM_DIV_VAL6,
                    ASSM_DIV_VAL7, ASSM_DIV_VAL8, ASSM_DIV_VAL9,
@@ -103,8 +105,9 @@ class RawAssumptionLoader:
         if row is None:
             raise ValueError(f"IDNO {idno} not found")
 
-        assm_divs = [str(v) if v is not None else "^" for v in row[11:26]]
-        rsk_divs = [str(v) if v is not None else "^" for v in row[26:36]]
+        main_pterm = int(row[11]) if row[11] is not None else int(row[6])
+        assm_divs = [str(v) if v is not None else "^" for v in row[12:27]]
+        rsk_divs = [str(v) if v is not None else "^" for v in row[27:37]]
 
         return ContractInfo(
             idno=int(row[0]),
@@ -120,6 +123,7 @@ class RawAssumptionLoader:
             ctr_dt=int(row[10]),
             assm_divs=assm_divs,
             rsk_divs=rsk_divs,
+            main_pterm_yy=main_pterm,
         )
 
     # ------------------------------------------------------------------
@@ -362,13 +366,11 @@ class RawAssumptionLoader:
                     v = float(row[col]) if pd.notna(row[col]) else 0.0
                     target[yr_idx] = v
 
-        # paidup: 마지막 유효값으로 연장
-        last_valid = 0
-        for i in range(max_years):
-            if paidup[i] != 0:
-                last_valid = i
-        if last_valid > 0:
-            paidup[last_valid + 1:] = paidup[last_valid]
+        # 마지막 데이터 컬럼 값으로 연장 (RT20 이후 = RT20 값 유지)
+        n_data = len(val_cols)
+        if n_data < max_years:
+            for arr in (paying, paidup):
+                arr[n_data:] = arr[n_data - 1]
 
         return paying, paidup
 
