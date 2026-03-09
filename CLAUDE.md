@@ -14,11 +14,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python 3, pandas, numpy (core)
 - sqlite3 (built-in, v1 primary database)
-- duckdb (v2 Star Schema)
+- duckdb (raw 테이블 직접 조회)
 
 ## Running
 
 ```bash
+# OD_RSK_RT / OD_LAPSE_RT 단건 검증 (IDNO=760397)
+python test_rsk_lapse_rt.py
+
+# OD_LAPSE_RT 전건 검증 (42,001건)
+python test_lapse_rt_all.py
+
+# OD_TRAD_PV 전건 검증 (42,000건 × 43컬럼)
+python test_trad_pv_all.py
+
+# OD_TBL_BN 전건 검증 (32,962건 × 72,797 BNFT)
+python test_tbl_bn.py
+
 # v1 단건 테스트 (기본 IDNO=8833)
 python test_single_contract.py
 
@@ -27,20 +39,77 @@ python test_single_contract.py --idno 760397
 
 # v1 메인 파이프라인
 python -m cf_module.main --sample 500
-
-# v2 실제 DB 연동 테스트 (t=1 검증)
-python test_v2_real.py
-
-# v2 OD_TBL_MN 전체 비교 (344개월 × 12항목)
-python test_v2_vs_proj_o2.py
-python test_v2_vs_proj_o2.py --csv   # 비교 결과 CSV 저장
-python test_v2_vs_proj_o2.py --keep-db  # DuckDB 파일 보존
-
-# v2 합성 데이터 단위 테스트
-python -m cf_module.v2.test_v2
 ```
 
-## Architecture (ver1.1)
+## Architecture — 산출 모듈 (현재 활성)
+
+### OD_RSK_RT (위험률 산출) — 42,001건 ALL PASS
+
+| 파일 | 역할 |
+|------|------|
+| `data/rsk_lapse_loader.py` | RawAssumptionLoader: 드라이버 키매칭 (15차원 ASSM_DIV_VAL) |
+| `calc/tbl_rsk_rt.py` | compute_rsk_rt: 원율 → BEPRD → 월변환 → 면책 적용 |
+| `test_rsk_lapse_rt.py` | PROJ_O2.vdb 기대값 비교 (7 risk × 9 col × 345 steps) |
+
+**핵심 공식**:
+- 경과년수: `ceil(months/12)` = `max((duration_months - 1) // 12 + 1, 1)`
+- 연령: `entry_age + max(duration_months - 1, 0) // 12`
+- BF_YR = RSK_RT × LOSS_RT × MTH_EFECT × BEPRD × TRD × ARVL
+- 월변환(mm_trf_way_cd=1): `1 - (1 - bf_yr)^(1/12)`
+- 월변환(mm_trf_way_cd=2): `bf_yr / 12`
+- 면책: `duration_months < invld_mm` → 0
+
+### OD_LAPSE_RT (해지율 산출) — 42,001건 × 3컬럼 ALL PASS
+
+| 파일 | 역할 |
+|------|------|
+| `data/rsk_lapse_loader.py` | load_lapse_rates: KDCD=12(납입중)/13(납입후) 드라이버 매칭 |
+| `calc/tbl_lapse_rt.py` | compute_lapse_rt: 납입중/납입후 선택 → SKEW(1/12) → APLY |
+| `test_lapse_rt_all.py` | duckdb OD_LAPSE_RT 기대값 42,001건 전건 비교 |
+
+**핵심 규칙**:
+- SKEW = 1/12 상수 (IA_T_SKEW 월별 가중치와 무관 — OD_LAPSE_RT는 단순 월환산만)
+- 납입중/납입후 전환: **MAIN_PAYPR_YYCNT**(주계약 납입기간) 기준, PAYPR_YYCNT(특약) 아님
+- `is_paying = duration_months <= main_pterm_months` (pterm월 포함 = 납입중)
+- 납입후 경과: `paidup_months = duration_months - main_pterm_months` (납입후 기준 상대 경과)
+- Paying 연장: 마지막 데이터 컬럼(RT20) 값 유지 (RT20=0이면 0 연장)
+- 만기도래: `elapsed >= bterm_months` → TRMNAT=0, SKEW=0, APLY=0 (9건)
+- APLY = `1 - (1 - TRMNAT_RT)^(1/12)`
+
+### OD_TRAD_PV (전통형 현가) — 42,000건 × 43컬럼 ALL PASS
+
+| 파일 | 역할 |
+|------|------|
+| `calc/trad_pv.py` | 7단계 산출 (보험료→PRPD→이율→적립금→환급금→KICS→약관대출) |
+| `data/trad_pv_loader.py` | TradPVDataCache: 12개 테이블 일괄 로드 |
+| `pipeline.py` | run_trad_pv_pipeline: 배치 처리 (98개 PROD_CD/CLS_CD 그룹) |
+| `test_trad_pv_all.py` | 전건 검증 |
+
+### OD_TBL_BN (급부 테이블) — 32,962건 × 16컬럼 Phase 1 PASS
+
+| 파일 | 역할 |
+|------|------|
+| `calc/tbl_bn.py` | Per-BNFT 독립 exit rate → tpx → 탈퇴자/발생건 → PYAMT |
+| `data/bn_loader.py` | 6개 참조테이블 로드 |
+| `test_tbl_bn.py` | Phase 1 검증 |
+
+### RawAssumptionLoader 드라이버 키매칭
+
+**데이터 흐름**:
+```
+II_INFRC (계약 정보, ASSM_DIV_VAL1~15, RSK_RT_DIV_VAL1~10)
+  → IA_M_ASSM_DRIV (활성 차원: ASSM_DIV_VAL_YN 0=무시, 1=ETC매핑, 2=원본유지)
+    → IA_M_ETC_ASSM_KEY (ASSM_GRP_CD 매핑)
+    → IA_M_PROD_GRP (상품그룹 매핑)
+  → IA_T_TRMNAT (해지율), IR_RSKRT_VAL (위험률), IA_T_SKEW (스큐) 등
+```
+
+**ContractInfo 주요 필드**:
+- `pterm_yy`: PAYPR_YYCNT (특약 납입기간)
+- `main_pterm_yy`: MAIN_PAYPR_YYCNT (주계약 납입기간) — **해지율 paying/paidup 판정용**
+- `bterm_yy`: INSTRM_YYCNT (보험기간)
+
+## Architecture (ver1.1) — 기존 v1 프레임워크
 
 ### Data Flow
 
@@ -55,19 +124,6 @@ CFConfig (config.py)
     → run_projection (projection/projector.py)    ← CF 산출
 ```
 
-### Key Modules
-
-| 모듈 | 역할 |
-|------|------|
-| `config.py` | CFConfig, RunsetParams, DBConfig 등 설정 |
-| `io/reader.py` | DataReader — sqlite3/DuckDB, named params (:name) |
-| `data/model_point.py` | MP 로딩 (II_INFRC) |
-| `data/assumptions.py` | 가정 로딩: MortalityTable, LapseTable, SkewTable + 중복제거 메타 |
-| `data/assm_key_builder.py` | 복합키 빌더 (위험률, 해지율, 스큐, BEPRD) |
-| `calc/timing.py` | 시간축: duration, age, is_in_force |
-| `calc/decrement.py` | 탈퇴율: qx/wx 매핑 + 중복제거 + tpx 산출 |
-| `projection/projector.py` | 8단계 프로젝션 (timing→decrement→premium→benefit→expense→reserve→discount→PV) |
-
 ### 중복제거 위험률 (calc/decrement.py)
 
 **공식**: `q'ᵢ = qᵢ × (1 - Σⱼ(qⱼ × Cᵢⱼ) / 2)`
@@ -77,143 +133,45 @@ C행렬 조건 (Cᵢⱼ = 0):
 2. 동일위험그룹 (RSK_GRP_NO 동일)
 3. j가 사망위험 (DEAD_RT_DVCD = 0)
 
-**DB 메타데이터 출처**:
-- `IR_RSKRT_CHR` → DEAD_RT_DVCD (0=사망, 1=비사망)
-- `IP_R_RSKRT_C` → RSK_GRP_NO (동일위험그룹)
-- `IP_R_COV_RSKRT_C` → RSVAMT_DEFRY_DRPO_RSKRT_YN (준비금탈퇴), PYEXSP_DRPO_RSKRT_YN (납입면제탈퇴)
-- `IP_R_BNFT_RSKRT_C` → BNFT_DRPO_RSKRT_YN (급부탈퇴)
-
 **탈퇴 위험률 분류**:
 - CTR (유지자): is_exit = RSVAMT_YN | BNFT_YN
-- PAY (납입자): is_exit = RSVAMT_YN | BNFT_YN | PYEXSP_YN ← **v1/v2 모두 구현 완료**
-
-### queries/ 디렉토리
-
-60개 `.sql` 파일. `:named` 파라미터 스타일. DataReader가 디렉토리에서 자동 로딩.
+- PAY (납입자): is_exit = RSVAMT_YN | BNFT_YN | PYEXSP_YN
 
 ### 검증 데이터
 
+- `duckdb_transform.duckdb`: 42,001건 raw 데이터 + OD_RSK_RT, OD_LAPSE_RT 기대값
 - `PROJ_O2.vdb` (`C:\python\cf_module\PROJ_O2.vdb`): INFRC_IDNO=760397 기대값
   - OD_RSK_RT, OD_LAPSE_RT, OD_TBL_MN (CTR_* / PAY_* 컬럼, 345행)
-- Legacy DB: `C:\Users\thrus\Downloads\VSOLN2\VSOLN2.vdb`
 
-## Architecture (v2)
+## Current Status
 
-### Data Flow
+### 완료 — 전건 검증 PASS
 
-```
-VSOLN2.vdb (Legacy SQLite)
-  → migrate_legacy_db() (v2/etl.py)     ← 드라이버 기반 키매칭
-    → DuckDB Star Schema (v2/schema.py)
-      - dim_contract, dim_risk, map_contract_risk
-      - fact_mortality, fact_lapse, fact_skew, fact_beprd, fact_reserve
-  → load_group_assumptions() (v2/engine.py)  ← GroupAssumptions
-  → project_group() (v2/engine.py)           ← ProjectionResultV2
-```
-
-### v2 Key Modules
-
-| 모듈 | 역할 |
-|------|------|
-| `v2/schema.py` | DuckDB Star Schema DDL (10개 테이블) |
-| `v2/etl.py` | Legacy SQLite → DuckDB 변환 (키매칭, 드라이버 해석) |
-| `v2/engine.py` | 중복제거 + CTR/PAY tpx + 탈퇴자 분해 프로젝션 |
-
-### v2 프로젝션 엔진 핵심 로직 (engine.py)
-
-**단계**:
-1. 위험률(qx_raw) 로드: 연령별/단일률 + BEPRD 적용 (연도 단위)
-2. 해지율(wx_raw) 로드: paying/paidup 구분 + 월률 변환 `1-(1-q)^(1/12)`
-3. 중복제거: CTR (RSVAMT|BNFT) / PAY (RSVAMT|BNFT|PYEXSP)
-4. tpx 산출: CTR tpx, PAY pay_tpx (cumprod)
-5. 탈퇴자 분해: d_rsvamt, d_bnft (CTR tpx_bot 기준), d_pyexsp (PAY pay_tpx_bot 기준)
-
-**주요 공식**:
-- Duration years: `month // 12 + 1` (PROJ_O2 기준)
-- Age: `entry_age + month // 12`
-- Elapsed: `CLOS_YM - ctr_ym + 1` (계약월 포함)
-- is_paying: `duration_months < pterm_months` (strict less)
-- Paidup lapse: 납입후 시작 기준 상대 경과 (계약 시작 아님)
-- BEPRD: 데이터 범위 초과 시 마지막 값 연장
-
-### OD_TBL_MN 비교 항목 (test_v2_vs_proj_o2.py)
-
-| # | 항목 | v2 출처 | 기준 |
-|---|------|---------|------|
-| 1 | CTR_TRME (유지자수) | tpx | CTR tpx |
-| 2 | CTR_TRMNAT_RT (해약률) | wx_ctr | CTR 중복제거 |
-| 3 | CTR_RSVAMT_DRPO_RSKRT | d_rsvamt / tpx_bot | CTR tpx_bot |
-| 4 | CTR_BNFT_DRPO_RSKRT | d_bnft / tpx_bot | CTR tpx_bot |
-| 5 | CTR_TRMPSN (해약자수) | tpx_bot × wx_ctr | CTR tpx_bot |
-| 6 | CTR_RSVAMT_DRPSN | d_rsvamt | CTR tpx_bot |
-| 7 | CTR_BNFT_DRPSN | d_bnft | CTR tpx_bot |
-| 8 | PAY_TRME (납입자수) | pay_tpx | PAY tpx |
-| 9 | PAY_TRMNAT_RT (납입해약률) | wx_pay | PAY 중복제거 |
-| 10 | PYEXSP_DRPO_RSKRT | d_pyexsp / pay_tpx_bot | PAY pay_tpx_bot |
-| 11 | PAY_TRMPSN (납입해약자수) | pay_tpx_bot × wx_pay | PAY pay_tpx_bot |
-| 12 | PYEXSP_DRPSN | d_pyexsp | PAY pay_tpx_bot |
-
-## Current Status (ver1.1)
-
-### 완료 (v1)
-
-- [x] queries.json → queries/ 마이그레이션 (60개 SQL)
-- [x] DataReader: 디렉토리 로딩 + named params + DuckDB
-- [x] ContractParams → RunsetParams 리네이밍
-- [x] 위험률 DB키매칭: MortalityKeyBuilder + BEPRD + 월변환
-- [x] 해약률 DB키매칭: AssumptionKeyBuilder + 납입기간/납입후
-- [x] 스큐 DB키매칭
-- [x] CTR 중복제거 위험률 (RSVAMT + BNFT)
-- [x] CTR tpx (유지자수) 검증: 8833, 760397 모두 PROJ_O2.vdb 일치
-- [x] pyexsp_drpo_yn 로딩 (IP_R_COV_RSKRT_C에서)
-- [x] DEBUG 로깅 (timing, decrement, assumptions, projector)
-- [x] test_single_contract.py --idno 인자
-- [x] PAY 중복제거 + 납입자수(pay_tpx): v1 decrement.py 구현
-- [x] debug CSV: 02_decrement.csv에 PAY 컬럼 포함
-- [x] PAY 결과 검증 (v1): test_single_contract.py에 760397 PROJ_O2.vdb 기대값 비교 추가
-
-### 완료 (v2)
-
-- [x] v2 Star Schema 설계: 10개 테이블 (dim 3 + fact 5 + meta 1 + interest 1)
-- [x] v2 ETL: VSOLN2.vdb → DuckDB (드라이버 기반 키매칭 — 위험률/해지율/스큐/BEPRD/준비금)
-- [x] v2 engine: 중복제거 + CTR/PAY tpx + 탈퇴자 분해 프로젝션
-- [x] 해지율 월변환: `1-(1-q)^(1/12)` (skew 미적용, v1과 동일)
-- [x] BEPRD 연도 단위 인덱싱 + 마지막 값 연장
-- [x] Paidup lapse: 납입후 시작 기준 상대 경과
-- [x] d_pyexsp: PAY pay_tpx_bot 기준 (CTR tpx_bot 아님)
-- [x] v2 합성 데이터 단위 테스트: test_v2.py (C행렬, einsum, 파이프라인)
-- [x] v2 실제 DB 검증 (t=1): test_v2_real.py — PROJ_O2.vdb 기대값 전항목 PASS (diff < 1e-10)
-- [x] v2 OD_TBL_MN 전체 비교: test_v2_vs_proj_o2.py — **344개월 × 12항목 전부 PASS (diff < 1e-15)**
-
-### 완료 (OD_TBL_BN)
-
-- [x] BN Phase 1 검증: 32,962건 × 72,797 BNFT, 15/16 컬럼 ALL PASS
-- [x] bn_loader.py: 6개 참조테이블 로드 (BNFT_RSKRT_C, BNFT_BAS, DEFRY_RT, NCOV, INVLD_TRMNAT, PRTT_BNFT_RT)
-- [x] tbl_bn.py: Per-BNFT 독립 exit rate → tpx → TRME/TRMO → 탈퇴자/발생건 → PYAMT/BNFT_INSUAMT
-- [x] test_tbl_bn.py: Phase 1 검증 (rate 컬럼을 기대값에서 읽고 파생 컬럼 검증)
-- [x] t=0 규칙: TRMO[0]=1, TRME[0]=1, 모든 count=0 (MN과 다른 BN 전용 초기화)
-- [x] PYAMT: PRTT≠0 → CRIT×PRTT, else CRIT×DEFRY (263건 float precision 1.49e-6 이내)
-
-### 진행중 (OD_RSK_RT / OD_LAPSE_RT)
-
-- [ ] **OD_RSK_RT / OD_LAPSE_RT 산출 모듈**: duckdb_transform.duckdb raw 테이블에서 드라이버 매칭 → 결과 테이블 산출
-  - `data/rsk_lapse_loader.py`: RawAssumptionLoader (드라이버 키매칭 — v1 assm_key_builder.py 참고)
-  - `calc/tbl_rsk_rt.py`: compute_rsk_rt (위험률 원율 → BEPRD → 월변환 → 면책)
-  - `calc/tbl_lapse_rt.py`: compute_lapse_rt (해지율 → 스큐 적용 → 월변환)
-  - `test_rsk_lapse_rt.py`: PROJ_O2.vdb 기대값 비교 검증
-  - **v2 ETL 미사용** — raw 테이블에서 직접 드라이버 매칭
+- [x] **OD_RSK_RT**: 42,001건 × 9컬럼 ALL PASS (드라이버 키매칭 → 원율 → BEPRD → 월변환 → 면책)
+- [x] **OD_LAPSE_RT**: 42,001건 × 3컬럼 ALL PASS (SKEW=1/12, MAIN_PAYPR 기준 전환)
+- [x] **OD_TRAD_PV**: 42,000건 × 43컬럼 ALL PASS (보험료→PRPD→이율→적립금→환급금→KICS→대출)
+- [x] **OD_TBL_BN Phase 1**: 32,962건 × 16컬럼 (15/16 PASS, PYAMT float precision 1.49e-6)
+- [x] **OD_TBL_MN**: 344개월 × 12항목 ALL PASS (CTR/PAY tpx + 중복제거 + 탈퇴자 분해)
 
 ### 미구현 (다음 작업)
 
 - [ ] **BN Phase 2**: Per-BNFT 독립 중복제거 엔진 (driver 기반 가정 매칭)
 - [ ] **BN Phase 2**: DEFRY_RT/PRTT_RT/GRADIN_RT 자체 산출
-- [ ] **v2 오케스트레이터**: 대량 계약 청크 처리 + 병렬화
 - [ ] **Premium/Benefit/Expense/Reserve/Discount/PV 단계**: projector.py 8단계 중 3~8단계
 
-### PAY 구현 참고사항
+---
 
-760397 계약 기준:
-- 7개 위험률코드 중 CTR exit: 2개 (111018-BNFT, 212015-RSVAMT)
-- PAY exit: 7개 전부 (PYEXSP 5개 추가: 241208, 121108, 241171, 211024, 221139)
-- PAY C행렬: 8×8 (wx + 7 risks), CTR보다 큰 adjustment → pay_tpx < ctr_tpx
-- 기대값: PAY_TRMNAT_RT=0.0063239731, PYEXSP_DRPO_RSKRT=0.0010430155, PAY_TRME(t=1)=0.9925024849
+<details>
+<summary>v2 아키텍처 (현재 비활성 — 참고용)</summary>
+
+v2는 초기 프로토타입으로, 현재는 raw 테이블 직접 조회 방식으로 전환됨. 코드는 `v2/` 디렉토리에 남아있으나 활성 개발 대상 아님.
+
+| 모듈 | 역할 |
+|------|------|
+| `v2/schema.py` | DuckDB Star Schema DDL |
+| `v2/etl.py` | Legacy SQLite → DuckDB 변환 |
+| `v2/engine.py` | 중복제거 + tpx + 탈퇴자 분해 |
+
+테스트: `test_v2_real.py`, `test_v2_vs_proj_o2.py`, `python -m cf_module.v2.test_v2`
+
+</details>
