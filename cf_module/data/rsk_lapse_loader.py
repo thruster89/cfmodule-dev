@@ -55,6 +55,8 @@ class ContractInfo:
     assm_divs: List[str]   # ASSM_DIV_VAL1~15
     rsk_divs: List[str]    # RSK_RT_DIV_VAL1~10
     main_pterm_yy: int = 0  # MAIN_PAYPR_YYCNT (주계약 납입기간)
+    ctr_tpcd: str = "0"     # CTR_TPCD (9=적립형)
+    pay_stcd: str = "1"     # PAY_STCD (1=납입중, 2=납입완료, 3=납입면제)
 
 
 @dataclass
@@ -89,7 +91,7 @@ class RawAssumptionLoader:
             SELECT INFRC_IDNO, PROD_CD, CLS_CD, COV_CD,
                    ISRD_JOIN_AGE, INSTRM_YYCNT, PAYPR_YYCNT,
                    PASS_YYCNT, PASS_MMCNT, CLOS_YM, CTR_DT,
-                   MAIN_PAYPR_YYCNT,
+                   MAIN_PAYPR_YYCNT, CTR_TPCD, PAY_STCD,
                    ASSM_DIV_VAL1, ASSM_DIV_VAL2, ASSM_DIV_VAL3,
                    ASSM_DIV_VAL4, ASSM_DIV_VAL5, ASSM_DIV_VAL6,
                    ASSM_DIV_VAL7, ASSM_DIV_VAL8, ASSM_DIV_VAL9,
@@ -106,8 +108,10 @@ class RawAssumptionLoader:
             raise ValueError(f"IDNO {idno} not found")
 
         main_pterm = int(row[11]) if row[11] is not None else int(row[6])
-        assm_divs = [str(v) if v is not None else "^" for v in row[12:27]]
-        rsk_divs = [str(v) if v is not None else "^" for v in row[27:37]]
+        ctr_tpcd = str(row[12]) if row[12] is not None else "0"
+        pay_stcd = str(row[13]) if row[13] is not None else "1"
+        assm_divs = [str(v) if v is not None else "^" for v in row[14:29]]
+        rsk_divs = [str(v) if v is not None else "^" for v in row[29:39]]
 
         return ContractInfo(
             idno=int(row[0]),
@@ -124,6 +128,8 @@ class RawAssumptionLoader:
             assm_divs=assm_divs,
             rsk_divs=rsk_divs,
             main_pterm_yy=main_pterm,
+            ctr_tpcd=ctr_tpcd,
+            pay_stcd=pay_stcd,
         )
 
     # ------------------------------------------------------------------
@@ -497,3 +503,56 @@ class RawAssumptionLoader:
             months = cnt * 12 if tpcd == "Y" else cnt
             result[rsk_cd] = months
         return result
+
+    # ------------------------------------------------------------------
+    # 중복제거용 exit flag (IP_R_COV_RSKRT_C, IP_R_BNFT_RSKRT_C)
+    # ------------------------------------------------------------------
+    def load_exit_flags(
+        self, ctr: ContractInfo, risks: List[RiskInfo]
+    ) -> Dict[str, Dict[str, int]]:
+        """위험률코드별 탈퇴 플래그 로드.
+
+        IP_R_COV_RSKRT_C / IP_R_BNFT_RSKRT_C의 모든 코드를 포함
+        (C1/C2 등 IP_R_RSKRT_C에 없는 코드도 포함).
+
+        Returns:
+            {rsk_cd: {"rsvamt": 0|1, "bnft": 0|1, "pyexsp": 0|1}}
+        """
+        rsk_cds = [r.risk_cd for r in risks]
+        flags = {cd: {"rsvamt": 0, "bnft": 0, "pyexsp": 0} for cd in rsk_cds}
+
+        # IP_R_COV_RSKRT_C → RSVAMT + PYEXSP
+        rows = self.conn.execute(f"""
+            SELECT RSK_RT_CD, RSVAMT_DEFRY_DRPO_RSKRT_YN, PYEXSP_DRPO_RSKRT_YN
+            FROM {self.p}IP_R_COV_RSKRT_C
+            WHERE PROD_CD = ? AND CLS_CD = ? AND COV_CD = ?
+        """, [ctr.prod_cd, ctr.cls_cd, ctr.cov_cd]).fetchall()
+        for r in rows:
+            cd = str(r[0])
+            if cd not in flags:
+                flags[cd] = {"rsvamt": 0, "bnft": 0, "pyexsp": 0}
+            flags[cd]["rsvamt"] = int(r[1]) if r[1] is not None else 0
+            flags[cd]["pyexsp"] = int(r[2]) if r[2] is not None else 0
+
+        # IP_R_BNFT_RSKRT_C → BNFT
+        # 규칙: BNFT_DRPO_RSKRT_YN=1 AND MIN(BNFT_RSKRT_YN)=0
+        #   → BNFT_RSKRT_YN=0인 BNFT_NO가 있어야 탈퇴위험으로 인정
+        #   → 전부 BNFT_RSKRT_YN=1이면 급부산출 전용 (탈퇴에 미사용)
+        rows = self.conn.execute(f"""
+            SELECT RSK_RT_CD,
+                   MAX(BNFT_DRPO_RSKRT_YN) as BNFT_YN,
+                   MIN(BNFT_RSKRT_YN) as MIN_RSKRT_YN
+            FROM {self.p}IP_R_BNFT_RSKRT_C
+            WHERE PROD_CD = ? AND CLS_CD = ? AND COV_CD = ?
+            GROUP BY RSK_RT_CD
+        """, [ctr.prod_cd, ctr.cls_cd, ctr.cov_cd]).fetchall()
+        for r in rows:
+            cd = str(r[0])
+            if cd not in flags:
+                flags[cd] = {"rsvamt": 0, "bnft": 0, "pyexsp": 0}
+            bnft_drpo = int(r[1]) if r[1] is not None else 0
+            min_rskrt_yn = int(r[2]) if r[2] is not None else 1
+            # BNFT exit = DRPO=1 AND 최소 하나의 BNFT_NO에서 RSKRT_YN=0
+            flags[cd]["bnft"] = 1 if (bnft_drpo == 1 and min_rskrt_yn == 0) else 0
+
+        return flags

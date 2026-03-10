@@ -151,7 +151,7 @@ C행렬 조건 (Cᵢⱼ = 0):
 - [x] **OD_LAPSE_RT**: 42,001건 × 3컬럼 ALL PASS (SKEW=1/12, MAIN_PAYPR 기준 전환)
 - [x] **OD_TRAD_PV**: 42,000건 × 43컬럼 ALL PASS (보험료→PRPD→이율→적립금→환급금→KICS→대출)
 - [x] **OD_TBL_BN Phase 1**: 32,962건 × 16컬럼 (15/16 PASS, PYAMT float precision 1.49e-6)
-- [x] **OD_TBL_MN**: 344개월 × 12항목 ALL PASS (CTR/PAY tpx + 중복제거 + 탈퇴자 분해)
+- [x] **OD_TBL_MN**: 42,001건 × 18컬럼 ALL PASS (OD_RSK_RT/OD_LAPSE_RT 입력 → 중복제거 → tpx → 탈퇴자 분해)
 
 ### 미구현 (다음 작업)
 
