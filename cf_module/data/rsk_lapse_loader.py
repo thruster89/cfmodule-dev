@@ -556,3 +556,69 @@ class RawAssumptionLoader:
             flags[cd]["bnft"] = 1 if (bnft_drpo == 1 and min_rskrt_yn == 0) else 0
 
         return flags
+
+    # ------------------------------------------------------------------
+    # 추가 위험코드 로드 (C1/C2 등 IP_R_RSKRT_C에 없는 코드)
+    # ------------------------------------------------------------------
+    def load_extra_risk_codes(
+        self, ctr: ContractInfo, existing_cds: set
+    ) -> List[RiskInfo]:
+        """IP_R_COV_RSKRT_C / IP_R_BNFT_RSKRT_C에만 있는 추가 위험코드 로드.
+
+        C1/C2 등 IP_R_RSKRT_C에는 없지만 exit_flags에 필요한 코드를
+        IR_RSKRT_CHR에서 메타 정보와 함께 로드한다.
+
+        Args:
+            ctr: 계약 정보
+            existing_cds: 이미 load_risk_codes로 로드된 코드 집합
+
+        Returns:
+            추가 RiskInfo 리스트 (unique rsk_grp_no 부여)
+        """
+        extra_cds = set()
+        for tbl in ("IP_R_COV_RSKRT_C", "IP_R_BNFT_RSKRT_C"):
+            rows = self.conn.execute(f"""
+                SELECT DISTINCT RSK_RT_CD FROM {self.p}{tbl}
+                WHERE PROD_CD = ? AND CLS_CD = ? AND COV_CD = ?
+            """, [ctr.prod_cd, ctr.cls_cd, ctr.cov_cd]).fetchall()
+            for r in rows:
+                cd = str(r[0])
+                if cd not in existing_cds:
+                    extra_cds.add(cd)
+
+        if not extra_cds:
+            return []
+
+        result = []
+        for rsk_cd in sorted(extra_cds):
+            chr_row = self.conn.execute(f"""
+                SELECT RSK_RT_CHR_CD, MM_TRF_WAY_CD, DEAD_RT_DVCD,
+                       RSK_RT_DIV_VAL_DEF_CD1, RSK_RT_DIV_VAL_DEF_CD2,
+                       RSK_RT_DIV_VAL_DEF_CD3, RSK_RT_DIV_VAL_DEF_CD4,
+                       RSK_RT_DIV_VAL_DEF_CD5, RSK_RT_DIV_VAL_DEF_CD6,
+                       RSK_RT_DIV_VAL_DEF_CD7, RSK_RT_DIV_VAL_DEF_CD8,
+                       RSK_RT_DIV_VAL_DEF_CD9, RSK_RT_DIV_VAL_DEF_CD10
+                FROM {self.p}IR_RSKRT_CHR
+                WHERE RSK_RT_CD = ?
+            """, [rsk_cd]).fetchone()
+
+            if chr_row:
+                def_cds = [str(chr_row[i]) if chr_row[i] is not None else None
+                           for i in range(3, 13)]
+                result.append(RiskInfo(
+                    risk_cd=rsk_cd,
+                    chr_cd=str(chr_row[0]) if chr_row[0] else "A",
+                    mm_trf_way_cd=int(chr_row[1]) if chr_row[1] else 1,
+                    dead_rt_dvcd=int(chr_row[2]) if chr_row[2] is not None else 0,
+                    rsk_grp_no=f"__{rsk_cd}__",
+                    def_cds=def_cds,
+                ))
+            else:
+                # IR_RSKRT_CHR에 없으면 사망위험 가상코드로 추가
+                result.append(RiskInfo(
+                    risk_cd=rsk_cd,
+                    chr_cd="A", mm_trf_way_cd=1,
+                    dead_rt_dvcd=0, rsk_grp_no=f"__{rsk_cd}__",
+                ))
+
+        return result

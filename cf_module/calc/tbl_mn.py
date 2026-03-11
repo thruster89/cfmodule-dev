@@ -129,6 +129,7 @@ def compute_tbl_mn(
     wx_monthly: np.ndarray,
     exit_flags: Dict[str, Dict[str, int]],
     n_steps: int,
+    return_dedup: bool = False,
 ) -> dict:
     """계약 1건의 OD_TBL_MN 산출.
 
@@ -139,9 +140,11 @@ def compute_tbl_mn(
         wx_monthly: ndarray(n_steps) — OD_LAPSE_RT의 APLY_TRMNAT_RT
         exit_flags: {rsk_cd: {"rsvamt": 0|1, "bnft": 0|1, "pyexsp": 0|1}}
         n_steps: 프로젝션 스텝 수
+        return_dedup: True이면 (result, dedup_detail) 튜플 반환 (BN 연계용)
 
     Returns:
-        {column_name: ndarray(n_steps)} — 18개 컬럼
+        return_dedup=False: {column_name: ndarray(n_steps)} — 18개 컬럼
+        return_dedup=True: (result_dict, dedup_detail_dict)
     """
     elapsed = ctr.pass_yy * 12 + ctr.pass_mm
     bterm_months = ctr.bterm_yy * 12
@@ -166,6 +169,15 @@ def compute_tbl_mn(
             result["PAY_TRME_MTNPSN_CNT"] = z.copy()
         else:
             result["PAY_TRMO_MTNPSN_CNT"] = np.ones(n_steps, dtype=np.float64)
+        if return_dedup:
+            dedup_detail = {
+                "risk_cds": [r.risk_cd for r in risks],
+                "qx_ctr_per_risk": np.zeros((0, n_steps), dtype=np.float64),
+                "exit_idx_ctr": np.array([], dtype=np.int32),
+                "is_exit_rsv": np.zeros(len(risks), dtype=bool),
+                "wx_ctr": z.copy(),
+            }
+            return result, dedup_detail
         return result
 
     t_range = np.arange(n_steps, dtype=np.int32)
@@ -268,7 +280,7 @@ def compute_tbl_mn(
     pay_bnft_drpsn[0] = 0.0
     pyexsp_drpsn[0] = 0.0
 
-    return {
+    result = {
         # CTR (유지자 기준)
         "CTR_TRMO_MTNPSN_CNT": tpx_bot,
         "CTR_TRMNAT_RT": wx_dedup_ctr,
@@ -290,3 +302,15 @@ def compute_tbl_mn(
         "PYEXSP_DRPSN_CNT": pyexsp_drpsn,
         "PAY_TRME_MTNPSN_CNT": pay_tpx,
     }
+
+    if return_dedup:
+        dedup_detail = {
+            "risk_cds": [r.risk_cd for r in risks],
+            "qx_ctr_per_risk": qx_dedup_ctr,
+            "exit_idx_ctr": exit_idx_ctr,
+            "is_exit_rsv": rsv_mask,
+            "wx_ctr": wx_dedup_ctr,
+        }
+        return result, dedup_detail
+
+    return result
