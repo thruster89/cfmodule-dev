@@ -81,17 +81,72 @@ class RawAssumptionLoader:
             prefix: 테이블 접두사 (예: 'src.' for attached SQLite)
         """
         self.conn = conn
-        self.p = prefix  # 테이블 접두사
-        # (prod,cls,cov) 기준 캐시 — 계약 무관 데이터
-        self._cache_risk_codes = {}       # (prod,cls,cov) -> List[RiskInfo]
-        self._cache_invld = {}            # (prod,cls,cov) -> Dict[str,int]
-        self._cache_exit_flags = {}       # (prod,cls,cov) -> Dict[str,Dict]
-        self._cache_extra_risks = {}      # (prod,cls,cov, frozenset(existing)) -> List[RiskInfo]
+        self.p = prefix
+        # (prod,cls,cov) 기준 캐시
+        self._cache_risk_codes = {}
+        self._cache_invld = {}
+        self._cache_exit_flags = {}
+        self._cache_extra_risks = {}
+        # 드라이버 캐시 (일괄 사전 로드)
+        self._driv_cache = {}     # kdcd -> driv_row
+        self._prod_grp_cache = {} # (kdcd, file_id, map_crit, prod, cls) -> prod_grp
+        self._etc_key_cache = {}  # (kdcd, file_id, map_crit, key_no, div_val) -> grp_cd
+        self._rsk_cat_cache = {}  # (file_id, rsk_cd) -> rsk_cat_val
+        self._resolve_cache = {}  # (kdcd, prod, cls, assm_key) -> resolved
+        # 데이터 쿼리 캐시
+        self._data_cache = {}     # (table, where_clause) -> result
+        self._contract_cache = {} # idno -> ContractInfo
+        self._preload_driver_tables()
 
     # ------------------------------------------------------------------
     # 계약 정보 로드
     # ------------------------------------------------------------------
+    def preload_contracts(self, idnos=None):
+        """II_INFRC 일괄 로드 → _contract_cache."""
+        where = ""
+        if idnos:
+            id_list = ",".join(str(i) for i in idnos)
+            where = f" AND INFRC_IDNO IN ({id_list})"
+        rows = self.conn.execute(f"""
+            SELECT INFRC_IDNO, PROD_CD, CLS_CD, COV_CD,
+                   ISRD_JOIN_AGE, INSTRM_YYCNT, PAYPR_YYCNT,
+                   PASS_YYCNT, PASS_MMCNT, CLOS_YM, CTR_DT,
+                   MAIN_PAYPR_YYCNT, CTR_TPCD, PAY_STCD,
+                   ASSM_DIV_VAL1, ASSM_DIV_VAL2, ASSM_DIV_VAL3,
+                   ASSM_DIV_VAL4, ASSM_DIV_VAL5, ASSM_DIV_VAL6,
+                   ASSM_DIV_VAL7, ASSM_DIV_VAL8, ASSM_DIV_VAL9,
+                   ASSM_DIV_VAL10, ASSM_DIV_VAL11, ASSM_DIV_VAL12,
+                   ASSM_DIV_VAL13, ASSM_DIV_VAL14, ASSM_DIV_VAL15,
+                   RSK_RT_DIV_VAL1, RSK_RT_DIV_VAL2, RSK_RT_DIV_VAL3,
+                   RSK_RT_DIV_VAL4, RSK_RT_DIV_VAL5, RSK_RT_DIV_VAL6,
+                   RSK_RT_DIV_VAL7, RSK_RT_DIV_VAL8, RSK_RT_DIV_VAL9,
+                   RSK_RT_DIV_VAL10
+            FROM {self.p}II_INFRC WHERE INFRC_SEQ = 1{where}
+        """).fetchall()
+        for row in rows:
+            ctr = self._row_to_contract(row)
+            self._contract_cache[ctr.idno] = ctr
+
+    def _row_to_contract(self, row) -> ContractInfo:
+        main_pterm = int(row[11]) if row[11] is not None else int(row[6])
+        ctr_tpcd = str(row[12]) if row[12] is not None else "0"
+        pay_stcd = str(row[13]) if row[13] is not None else "1"
+        assm_divs = [str(v) if v is not None else "^" for v in row[14:29]]
+        rsk_divs = [str(v) if v is not None else "^" for v in row[29:39]]
+        return ContractInfo(
+            idno=int(row[0]), prod_cd=str(row[1]),
+            cls_cd=str(row[2]), cov_cd=str(row[3]),
+            entry_age=int(row[4]), bterm_yy=int(row[5]),
+            pterm_yy=int(row[6]), pass_yy=int(row[7]),
+            pass_mm=int(row[8]), clos_ym=int(row[9]),
+            ctr_dt=int(row[10]), assm_divs=assm_divs,
+            rsk_divs=rsk_divs, main_pterm_yy=main_pterm,
+            ctr_tpcd=ctr_tpcd, pay_stcd=pay_stcd,
+        )
+
     def load_contract(self, idno: int, infrc_seq: int = 1) -> ContractInfo:
+        if idno in self._contract_cache:
+            return self._contract_cache[idno]
         row = self.conn.execute(f"""
             SELECT INFRC_IDNO, PROD_CD, CLS_CD, COV_CD,
                    ISRD_JOIN_AGE, INSTRM_YYCNT, PAYPR_YYCNT,
@@ -112,30 +167,9 @@ class RawAssumptionLoader:
         if row is None:
             raise ValueError(f"IDNO {idno} not found")
 
-        main_pterm = int(row[11]) if row[11] is not None else int(row[6])
-        ctr_tpcd = str(row[12]) if row[12] is not None else "0"
-        pay_stcd = str(row[13]) if row[13] is not None else "1"
-        assm_divs = [str(v) if v is not None else "^" for v in row[14:29]]
-        rsk_divs = [str(v) if v is not None else "^" for v in row[29:39]]
-
-        return ContractInfo(
-            idno=int(row[0]),
-            prod_cd=str(row[1]),
-            cls_cd=str(row[2]),
-            cov_cd=str(row[3]),
-            entry_age=int(row[4]),
-            bterm_yy=int(row[5]),
-            pterm_yy=int(row[6]),
-            pass_yy=int(row[7]),
-            pass_mm=int(row[8]),
-            clos_ym=int(row[9]),
-            ctr_dt=int(row[10]),
-            assm_divs=assm_divs,
-            rsk_divs=rsk_divs,
-            main_pterm_yy=main_pterm,
-            ctr_tpcd=ctr_tpcd,
-            pay_stcd=pay_stcd,
-        )
+        ctr = self._row_to_contract(row)
+        self._contract_cache[idno] = ctr
+        return ctr
 
     # ------------------------------------------------------------------
     # 위험률코드 매핑
@@ -222,6 +256,10 @@ class RawAssumptionLoader:
                     )
 
             div_where = " AND " + " AND ".join(div_filters) if div_filters else ""
+            cache_key = ("MORT", rsk_cd, div_where)
+            if cache_key in self._data_cache:
+                rates[rsk_cd] = self._data_cache[cache_key]
+                continue
 
             df = self.conn.execute(f"""
                 SELECT AGE, RSK_RT
@@ -232,6 +270,7 @@ class RawAssumptionLoader:
 
             if df.empty:
                 rates[rsk_cd] = np.zeros(1, dtype=np.float64)
+                self._data_cache[cache_key] = rates[rsk_cd]
                 continue
 
             ages = df["AGE"].values.astype(int)
@@ -245,91 +284,120 @@ class RawAssumptionLoader:
                 arr[ages] = vals
                 rates[rsk_cd] = arr
 
+            self._data_cache[cache_key] = rates[rsk_cd]
+
         return rates
 
     # ------------------------------------------------------------------
-    # 드라이버 기반 키매칭 (v1 assm_key_builder.py 참고)
+    # 드라이버 사전 로드 (일괄)
     # ------------------------------------------------------------------
-    def _resolve_assm_filter(
-        self, kdcd: int, ctr: ContractInfo
-    ) -> Optional[dict]:
-        """드라이버 기반 키매칭: KDCD별 가정 테이블 필터 조건 생성.
-
-        ASSM_DIV_VAL_YN 값:
-          0 = 무시 ('^')
-          1 = IA_M_ETC_ASSM_KEY에서 매핑
-          2 = 원본 ASSM_DIV_VAL 유지
-
-        Returns:
-            {"file_id": str, "prod_grp": str, "grp_filters": {col: val}}
-        """
-        drv = self.conn.execute(f"""
-            SELECT ASSM_FILE_ID, MAP_CRIT_SRNO, PROD_DIV_GRP_CD_YN, COV_DIV_GRP_CD_YN,
-                   RSK_CAT_VAL_YN,
+    def _preload_driver_tables(self):
+        """IA_M_ASSM_DRIV, IA_M_PROD_GRP, IA_M_ETC_ASSM_KEY, IA_M_RSK_CAT 일괄 로드."""
+        # IA_M_ASSM_DRIV
+        rows = self.conn.execute(f"""
+            SELECT ASSM_KDCD, ASSM_FILE_ID, MAP_CRIT_SRNO,
+                   PROD_DIV_GRP_CD_YN, COV_DIV_GRP_CD_YN, RSK_CAT_VAL_YN,
                    ASSM_DIV_VAL1_YN, ASSM_DIV_VAL2_YN, ASSM_DIV_VAL3_YN,
                    ASSM_DIV_VAL4_YN, ASSM_DIV_VAL5_YN, ASSM_DIV_VAL6_YN,
                    ASSM_DIV_VAL7_YN, ASSM_DIV_VAL8_YN, ASSM_DIV_VAL9_YN,
                    ASSM_DIV_VAL10_YN, ASSM_DIV_VAL11_YN, ASSM_DIV_VAL12_YN,
                    ASSM_DIV_VAL13_YN, ASSM_DIV_VAL14_YN, ASSM_DIV_VAL15_YN
             FROM {self.p}IA_M_ASSM_DRIV
-            WHERE ASSM_KDCD = ?
-        """, [kdcd]).fetchone()
+        """).fetchall()
+        for r in rows:
+            self._driv_cache[int(r[0])] = r
 
+        # IA_M_PROD_GRP (file_id를 str로 통일)
+        rows = self.conn.execute(f"""
+            SELECT ASSM_KDCD, ASSM_FILE_ID, MAP_CRIT_SRNO, PROD_CD, CLS_CD, PROD_GRP_CD
+            FROM {self.p}IA_M_PROD_GRP
+        """).fetchall()
+        for r in rows:
+            fid = str(r[1])
+            mc = r[2]
+            self._prod_grp_cache[(int(r[0]), fid, mc, str(r[3]), str(r[4]))] = str(r[5])
+            fb_key = (int(r[0]), fid, mc, str(r[3]))
+            if fb_key not in self._prod_grp_cache:
+                self._prod_grp_cache[fb_key] = str(r[5])
+
+        # IA_M_ETC_ASSM_KEY (file_id를 str로 통일)
+        rows = self.conn.execute(f"""
+            SELECT ASSM_KDCD, ASSM_FILE_ID, MAP_CRIT_SRNO, ASSM_KEY_NO, ASSM_DIV_VAL, ASSM_GRP_CD
+            FROM {self.p}IA_M_ETC_ASSM_KEY
+        """).fetchall()
+        for r in rows:
+            self._etc_key_cache[(int(r[0]), str(r[1]), r[2], int(r[3]), str(r[4]))] = str(r[5])
+
+        # IA_M_RSK_CAT (ASSM_KDCD 포함, file_id를 str로 통일)
+        rows = self.conn.execute(f"""
+            SELECT ASSM_KDCD, ASSM_FILE_ID, RSK_RT_CD, RSK_CAT_VAL
+            FROM {self.p}IA_M_RSK_CAT
+        """).fetchall()
+        for r in rows:
+            self._rsk_cat_cache[(int(r[0]), str(r[1]), str(r[2]))] = str(r[3])
+
+    # ------------------------------------------------------------------
+    # 드라이버 기반 키매칭 (캐시 기반, SQL 없음)
+    # ------------------------------------------------------------------
+    def _resolve_assm_filter(
+        self, kdcd: int, ctr: ContractInfo
+    ) -> Optional[dict]:
+        """드라이버 키매칭 (사전 로드된 캐시 사용, SQL 없음)."""
+        # 캐시 키: (kdcd, prod, cls, 활성 dim 값들)
+        drv = self._driv_cache.get(kdcd)
         if drv is None:
             return None
 
-        file_id = drv[0]
-        map_crit = drv[1]
-        prod_yn = int(drv[2])
-        div_yns = [int(v) for v in drv[5:]]  # 15개: 0, 1, or 2
+        file_id = str(drv[1])
+        map_crit = drv[2]
+        prod_yn = int(drv[3])
+        div_yns = [int(v) for v in drv[6:]]
 
-        # 상품그룹 매핑
+        # 캐시 키 구성 (활성 dim만)
+        active_vals = []
+        for i in range(15):
+            if div_yns[i] != 0:
+                active_vals.append((i, ctr.assm_divs[i] if i < len(ctr.assm_divs) else "^"))
+        cache_key = (kdcd, ctr.prod_cd, ctr.cls_cd, tuple(active_vals))
+        if cache_key in self._resolve_cache:
+            return self._resolve_cache[cache_key]
+
+        # 상품그룹 매핑 (인메모리)
         prod_grp = "^"
         if prod_yn:
-            pg_row = self.conn.execute(f"""
-                SELECT PROD_GRP_CD FROM {self.p}IA_M_PROD_GRP
-                WHERE ASSM_KDCD = ? AND ASSM_FILE_ID = ? AND MAP_CRIT_SRNO = ?
-                  AND PROD_CD = ? AND CLS_CD = ?
-            """, [kdcd, file_id, map_crit, ctr.prod_cd, ctr.cls_cd]).fetchone()
-            if pg_row is None:
-                pg_row = self.conn.execute(f"""
-                    SELECT PROD_GRP_CD FROM {self.p}IA_M_PROD_GRP
-                    WHERE ASSM_KDCD = ? AND ASSM_FILE_ID = ? AND MAP_CRIT_SRNO = ?
-                      AND PROD_CD = ?
-                    ORDER BY CLS_CD LIMIT 1
-                """, [kdcd, file_id, map_crit, ctr.prod_cd]).fetchone()
-            if pg_row:
-                prod_grp = str(pg_row[0])
+            pg = self._prod_grp_cache.get(
+                (kdcd, file_id, map_crit, ctr.prod_cd, ctr.cls_cd))
+            if pg is None:
+                pg = self._prod_grp_cache.get(
+                    (kdcd, file_id, map_crit, ctr.prod_cd))
+            if pg:
+                prod_grp = pg
 
-        # ASSM_GRP_CD 매핑: 활성 차원별
+        # ASSM_GRP_CD 매핑 (인메모리)
         grp_filters = {}
         for dim_idx in range(15):
             driv_value = div_yns[dim_idx]
+            if driv_value == 0:
+                continue
             key_no = dim_idx + 1
             col_name = f"ASSM_GRP_CD{key_no}"
             div_val = ctr.assm_divs[dim_idx] if dim_idx < len(ctr.assm_divs) else "^"
 
-            if driv_value == 0:
-                # 무시 — 필터에 포함하지 않음
-                continue
-            elif driv_value == 2:
-                # 원본 유지
+            if driv_value == 2:
                 grp_filters[col_name] = div_val if div_val else "^"
             elif driv_value == 1:
-                # ETC 매핑
-                grp_row = self.conn.execute(f"""
-                    SELECT ASSM_GRP_CD FROM {self.p}IA_M_ETC_ASSM_KEY
-                    WHERE ASSM_KDCD = ? AND ASSM_FILE_ID = ? AND MAP_CRIT_SRNO = ?
-                      AND ASSM_KEY_NO = ? AND ASSM_DIV_VAL = ?
-                """, [kdcd, file_id, map_crit, key_no, div_val]).fetchone()
-                grp_filters[col_name] = str(grp_row[0]) if grp_row else div_val
+                grp_cd = self._etc_key_cache.get(
+                    (kdcd, file_id, map_crit, key_no, div_val))
+                grp_filters[col_name] = grp_cd if grp_cd else div_val
 
-        return {
+        result = {
             "file_id": file_id,
             "prod_grp": prod_grp,
             "grp_filters": grp_filters,
-            "has_rsk": bool(drv[4]),
+            "has_rsk": bool(drv[5]),
         }
+        self._resolve_cache[cache_key] = result
+        return result
 
     def _build_where(self, resolved: dict) -> str:
         """resolved 필터를 SQL WHERE 절로 변환."""
@@ -358,12 +426,17 @@ class RawAssumptionLoader:
             return np.zeros(max_years), np.zeros(max_years)
 
         where = self._build_where(resolved)
+        cache_key = ("TRMNAT", where)
+        if cache_key in self._data_cache:
+            return self._data_cache[cache_key]
+
         df = self.conn.execute(f"""
             SELECT * FROM {self.p}IA_T_TRMNAT_RT WHERE {where}
         """).fetchdf()
 
         if df.empty:
-            return np.zeros(max_years), np.zeros(max_years)
+            self._data_cache[cache_key] = (np.zeros(max_years), np.zeros(max_years))
+            return self._data_cache[cache_key]
 
         val_cols = sorted(
             [c for c in df.columns if c.startswith("TRMNAT_RT") and c[9:].isdigit()],
@@ -387,6 +460,7 @@ class RawAssumptionLoader:
             for arr in (paying, paidup):
                 arr[n_data:] = arr[n_data - 1]
 
+        self._data_cache[cache_key] = (paying, paidup)
         return paying, paidup
 
     # ------------------------------------------------------------------
@@ -405,12 +479,18 @@ class RawAssumptionLoader:
             return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
 
         where = self._build_where(resolved)
+        cache_key = ("SKEW", where)
+        if cache_key in self._data_cache:
+            return self._data_cache[cache_key]
+
         df = self.conn.execute(f"""
             SELECT * FROM {self.p}IA_T_SKEW WHERE {where}
         """).fetchdf()
 
         if df.empty:
-            return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
+            result = np.full(max_months, 1.0 / 12.0, dtype=np.float64)
+            self._data_cache[cache_key] = result
+            return result
 
         val_cols = sorted(
             [c for c in df.columns if c.startswith("SKEW") and c[4:].isdigit()],
@@ -424,6 +504,7 @@ class RawAssumptionLoader:
             if mm_idx < max_months:
                 skew[mm_idx] = v
 
+        self._data_cache[cache_key] = skew
         return skew
 
     # ------------------------------------------------------------------
@@ -443,19 +524,20 @@ class RawAssumptionLoader:
 
         result = {}
         for risk_cd in risk_cds:
-            # RSK_CAT_VAL 매핑
-            rsk_cat = self.conn.execute(f"""
-                SELECT RSK_CAT_VAL FROM {self.p}IA_M_RSK_CAT
-                WHERE ASSM_KDCD = 9 AND ASSM_FILE_ID = ? AND RSK_RT_CD = ?
-            """, [resolved["file_id"], risk_cd]).fetchone()
+            # RSK_CAT_VAL 매핑 (인메모리)
+            rsk_cat_val = self._rsk_cat_cache.get((9, resolved["file_id"], risk_cd))
 
-            if rsk_cat is None:
+            if rsk_cat_val is None:
                 result[risk_cd] = np.ones(max_years, dtype=np.float64)
                 continue
 
-            rsk_cat_val = str(rsk_cat[0])
             where_parts = [self._build_where(resolved), f"RSK_CAT_VAL = '{rsk_cat_val}'"]
             where_sql = " AND ".join(where_parts)
+
+            cache_key = ("BEPRD", where_sql)
+            if cache_key in self._data_cache:
+                result[risk_cd] = self._data_cache[cache_key]
+                continue
 
             try:
                 df = self.conn.execute(f"""
@@ -489,6 +571,7 @@ class RawAssumptionLoader:
             if last_valid > 0 and last_valid < max_years - 1:
                 beprd[last_valid + 1:] = beprd[last_valid]
 
+            self._data_cache[cache_key] = beprd
             result[risk_cd] = beprd
 
         return result

@@ -123,12 +123,13 @@ def main():
     print("캐시 로드 중...")
     t0 = time.time()
     loader = RawAssumptionLoader(con)
+    loader.preload_contracts()
     trad_cache = TradPVDataCache(con)
     bn_cache = BNDataCache(con)
     exp_cache = ExpDataCache(con)
     dc_curve = trad_cache.dc_rt_curve
     cache_time = time.time() - t0
-    print(f"캐시 로드: {cache_time:.1f}s")
+    print(f"캐시 로드: {cache_time:.1f}s ({len(loader._contract_cache)}건 사전로드)")
 
     # 실행
     print("산출 시작...")
