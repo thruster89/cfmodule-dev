@@ -27,14 +27,9 @@ import numpy as np
 import pandas as pd
 
 
-# RSK_RT_DIV_VAL_DEF_CD → 계약의 RSK_RT_DIV_VAL 인덱스 매핑 (v1 qx_read.py 로직)
-DIV_VAL_DEF_CD_MAP = {
-    "49": 0,   # RSK_RT_DIV_VAL1
-    "21": 1,   # RSK_RT_DIV_VAL2
-    "22": 2,   # RSK_RT_DIV_VAL3
-    "03": 3,   # RSK_RT_DIV_VAL4
-    "70": 4,   # RSK_RT_DIV_VAL5
-    "71": 5,   # RSK_RT_DIV_VAL6
+# 1~6 고정 매핑 (fallback)
+_FIXED_DEF_CD_MAP = {
+    "49": 0, "21": 1, "22": 2, "03": 3, "70": 4, "71": 5,
 }
 
 
@@ -96,7 +91,43 @@ class RawAssumptionLoader:
         # 데이터 쿼리 캐시
         self._data_cache = {}     # (table, where_clause) -> result
         self._contract_cache = {} # idno -> ContractInfo
+        self._cov_def_cd_map = {} # (prod, cls, cov) -> {def_cd_value: rsk_div_index}
         self._preload_driver_tables()
+        self._preload_cov_def_cd()
+
+    # ------------------------------------------------------------------
+    # IP_P_COV DEF_CD 사전 로드 (RSK_RT_DIV_VAL 동적 매핑)
+    # ------------------------------------------------------------------
+    def _preload_cov_def_cd(self):
+        """IP_P_COV.RSK_RT_DIV_VAL_DEF_CD1~10 → {def_cd: rsk_div_index} 매핑.
+
+        IR_RSKRT_CHR.DEF_CD[pos] = code일 때,
+        IP_P_COV에서 같은 code가 DEF_CD[j]에 있으면 → II_INFRC.RSK_RT_DIV_VAL[j] 사용.
+        """
+        rows = self.conn.execute(f"""
+            SELECT PROD_CD, CLS_CD, COV_CD,
+                   RSK_RT_DIV_VAL_DEF_CD1, RSK_RT_DIV_VAL_DEF_CD2,
+                   RSK_RT_DIV_VAL_DEF_CD3, RSK_RT_DIV_VAL_DEF_CD4,
+                   RSK_RT_DIV_VAL_DEF_CD5, RSK_RT_DIV_VAL_DEF_CD6,
+                   RSK_RT_DIV_VAL_DEF_CD7, RSK_RT_DIV_VAL_DEF_CD8,
+                   RSK_RT_DIV_VAL_DEF_CD9, RSK_RT_DIV_VAL_DEF_CD10
+            FROM {self.p}IP_P_COV
+        """).fetchall()
+        for r in rows:
+            key = (str(r[0]), str(r[1]), str(r[2]))
+            mapping = {}
+            for i in range(10):
+                def_cd = str(r[3 + i]) if r[3 + i] else None
+                if def_cd:
+                    mapping[def_cd] = i  # def_cd → rsk_divs[i] 인덱스
+            self._cov_def_cd_map[key] = mapping
+
+    def _get_def_cd_map(self, prod_cd, cls_cd, cov_cd):
+        """(prod,cls,cov)의 DEF_CD → rsk_divs 인덱스 매핑 반환."""
+        m = self._cov_def_cd_map.get((prod_cd, cls_cd, cov_cd))
+        if m:
+            return m
+        return _FIXED_DEF_CD_MAP
 
     # ------------------------------------------------------------------
     # 계약 정보 로드
@@ -241,6 +272,9 @@ class RawAssumptionLoader:
         if not risks:
             return {}
 
+        # IP_P_COV 기반 동적 DEF_CD 매핑
+        def_cd_map = self._get_def_cd_map(ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
+
         rates = {}
         for risk in risks:
             rsk_cd = risk.risk_cd
@@ -248,8 +282,8 @@ class RawAssumptionLoader:
             div_filters = []
             for pos_idx in range(10):
                 def_cd = risk.def_cds[pos_idx] if risk.def_cds else None
-                if def_cd and def_cd in DIV_VAL_DEF_CD_MAP:
-                    ctr_idx = DIV_VAL_DEF_CD_MAP[def_cd]
+                if def_cd and def_cd in def_cd_map:
+                    ctr_idx = def_cd_map[def_cd]
                     ctr_val = ctr.rsk_divs[ctr_idx] if ctr_idx < len(ctr.rsk_divs) else "^"
                     div_filters.append(
                         f"RSK_RT_DIV_VAL{pos_idx + 1} = '{ctr_val}'"
