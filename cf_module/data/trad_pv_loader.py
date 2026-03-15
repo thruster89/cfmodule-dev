@@ -33,7 +33,13 @@ class TradPVDataCache:
         info = build_contract_info_cached(cache, idno)
     """
 
-    def __init__(self, conn: DBConn):
+    def __init__(self, conn: DBConn, idno_filter=None):
+        """
+        Args:
+            conn: DB 연결
+            idno_filter: IDNO 집합. 설정 시 계약 테이블만 필터 (상품 테이블은 전건).
+        """
+        self._idno_filter = idno_filter
         t0 = time.time()
         self._load_infrc(conn)
         self._load_rsvamt_bas(conn)
@@ -50,10 +56,17 @@ class TradPVDataCache:
         logger.info(f"TradPVDataCache loaded in {elapsed:.2f}s "
                      f"(infrc={len(self.infrc)}, bas={len(self.rsvamt_bas)})")
 
+    def _idno_sql(self, prefix="AND"):
+        """idno_filter 기반 SQL 조건절."""
+        if not self._idno_filter:
+            return ""
+        ids = ",".join(str(i) for i in self._idno_filter)
+        return f" {prefix} INFRC_IDNO IN ({ids})"
+
     # --- II_INFRC ---
     def _load_infrc(self, conn):
         self.infrc = {}
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT INFRC_IDNO, PROD_CD, COV_CD, CLS_CD, CTR_TPCD,
                    PASS_YYCNT, PASS_MMCNT, INSTRM_YYCNT, PAYPR_YYCNT,
                    GRNTPT_GPREM, GRNTPT_JOIN_AMT, PAY_STCD, PREM_DC_RT1,
@@ -61,7 +74,7 @@ class TradPVDataCache:
                    PAYPR_DVCD, ETC_EXPCT_BIZEXP_KEY_VAL,
                    ASSM_DIV_VAL1, CTR_LOAN_REMAMT,
                    INSTRM_DVCD, RENW_STCD, PAYCYC_DVCD, CTR_POLNO
-            FROM II_INFRC WHERE INFRC_SEQ = 1
+            FROM II_INFRC WHERE INFRC_SEQ = 1{self._idno_sql()}
         """).fetchall()
         for r in rows:
             gprem = r[9] or 0
@@ -101,7 +114,7 @@ class TradPVDataCache:
         yyend_cols = ", ".join(f"YYEND_RSVAMT{yr}" for yr in range(1, 121))
         sql = (f"SELECT INFRC_IDNO, CRIT_JOIN_AMT, NPREM, "
                f"{ystr_cols}, {yyend_cols} "
-               f"FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1")
+               f"FROM II_RSVAMT_BAS WHERE INFRC_SEQ = 1{self._idno_sql()}")
         rows = conn.execute(sql).fetchall()
         for r in rows:
             idno = r[0]

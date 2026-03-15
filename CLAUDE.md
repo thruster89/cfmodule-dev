@@ -28,8 +28,8 @@ python test_lapse_rt_all.py
 # OD_TRAD_PV 전건 검증 (42,000건 × 43컬럼)
 python test_trad_pv_all.py
 
-# OD_TBL_BN 전건 검증 (32,962건 × 72,797 BNFT)
-python test_tbl_bn.py
+# OD_TBL_BN Phase 2 전건 검증 (32,963건 × 72,798 BNFT)
+python test_tbl_bn_phase2.py --all
 
 # v1 단건 테스트 (기본 IDNO=8833)
 python test_single_contract.py
@@ -82,16 +82,59 @@ python -m cf_module.main --sample 500
 |------|------|
 | `calc/trad_pv.py` | 7단계 산출 (보험료→PRPD→이율→적립금→환급금→KICS→약관대출) |
 | `data/trad_pv_loader.py` | TradPVDataCache: 12개 테이블 일괄 로드 |
-| `pipeline.py` | run_trad_pv_pipeline: 배치 처리 (98개 PROD_CD/CLS_CD 그룹) |
 | `test_trad_pv_all.py` | 전건 검증 |
 
-### OD_TBL_BN (급부 테이블) — 32,962건 × 16컬럼 Phase 1 PASS
+### OD_TBL_BN (급부 테이블) — 32,963건 × 72,798 BNFT (16/16 PASS)
 
 | 파일 | 역할 |
 |------|------|
-| `calc/tbl_bn.py` | Per-BNFT 독립 exit rate → tpx → 탈퇴자/발생건 → PYAMT |
-| `data/bn_loader.py` | 6개 참조테이블 로드 |
-| `test_tbl_bn.py` | Phase 1 검증 |
+| `calc/tbl_bn.py` | Per-BNFT 독립 C행렬 dedup → tpx → 탈퇴자/발생건 → PYAMT |
+| `data/bn_loader.py` | 9개 참조테이블 로드 (risk_meta, rsvamt_flags, expct_inrt_prtt) |
+| `test_tbl_bn_phase2.py` | Phase 2 전건 검증 (raw OD_RSK_RT/OD_LAPSE_RT 입력) |
+
+**PRTT_RT 산출 (ann_due 기반)**:
+- `PRTT_RT = DEFRY_RT × ann_due(TOT, rate, CYC) × (CD==1 ? v² : 1)`
+- CD=1: EXPCT_INRT×v²(2개월이연), CD=3: AVG_PUBANO_INRT, CD=4: min(EXPCT, AVG_PUBANO)
+
+### OD_EXP (사업비) — 13/16 PASS (760397 단건)
+
+| 파일 | 역할 |
+|------|------|
+| `calc/exp.py` | DRVR별 사업비 산출 (GPREM/절대금액/BNFT/LOAN/KICS 기반) |
+| `data/exp_loader.py` | IA_E_ACQSEXP_DR/MNTEXP_DR/LOSS_SVYEXP + 드라이버 키매칭 |
+
+### OD_CF (캐시플로우) — 21/26 PASS (760397 단건)
+
+| 파일 | 역할 |
+|------|------|
+| `calc/cf.py` | MN×TRAD_PV(보험료) + BN(보험금) + MN×EXP(사업비) 결합 |
+
+### OD_DC_RT (할인율) — 2/2 ALL PASS
+
+| 파일 | 역할 |
+|------|------|
+| `calc/dc_rt.py` | IE_DC_RT 커브 → v=(1+r)^(-1/12) → 기시(TRMO)/기말(TRME) 누적곱 |
+
+### OD_PVCF (현가 캐시플로우) — 22/27 PASS
+
+| 파일 | 역할 |
+|------|------|
+| `calc/pvcf.py` | CF × DC_RT (기시: 보험료/사업비, 기말: 보험금/해약) |
+
+### OP_BEL (최선추정부채) — 21/26 PASS
+
+| 파일 | 역할 |
+|------|------|
+| `calc/bel.py` | PVCF 전 시점 합산 → BEL |
+
+### 전체 파이프라인
+
+| 파일 | 역할 |
+|------|------|
+| `pipeline.py` | run_pipeline: RSK→LAPSE→MN→PV→BN 전체 배치 |
+| `run.py` | run_single/run_batch: 단건/다건 파이프라인 + CSV 출력 |
+
+**파이프라인 체인**: `RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT → PVCF → BEL`
 
 ### RawAssumptionLoader 드라이버 키매칭
 
@@ -147,17 +190,26 @@ C행렬 조건 (Cᵢⱼ = 0):
 
 ### 완료 — 전건 검증 PASS
 
-- [x] **OD_RSK_RT**: 42,001건 × 9컬럼 ALL PASS (드라이버 키매칭 → 원율 → BEPRD → 월변환 → 면책)
-- [x] **OD_LAPSE_RT**: 42,001건 × 3컬럼 ALL PASS (SKEW=1/12, MAIN_PAYPR 기준 전환)
-- [x] **OD_TRAD_PV**: 42,000건 × 43컬럼 ALL PASS (보험료→PRPD→이율→적립금→환급금→KICS→대출)
-- [x] **OD_TBL_BN Phase 1**: 32,962건 × 16컬럼 (15/16 PASS, PYAMT float precision 1.49e-6)
-- [x] **OD_TBL_MN**: 42,001건 × 18컬럼 ALL PASS (OD_RSK_RT/OD_LAPSE_RT 입력 → 중복제거 → tpx → 탈퇴자 분해)
+- [x] **OD_RSK_RT**: 42,001건 × 9컬럼 ALL PASS
+- [x] **OD_LAPSE_RT**: 42,001건 × 3컬럼 ALL PASS
+- [x] **OD_TRAD_PV**: 42,000건 × 43컬럼 ALL PASS
+- [x] **OD_TBL_MN**: 42,001건 × 18컬럼 ALL PASS
+- [x] **OD_TBL_BN**: 16/16컬럼 PASS (PRTT_RT CD=1/3/4 구현 완료)
+- [x] **OD_DC_RT**: 2/2컬럼 ALL PASS
 
-### 미구현 (다음 작업)
+### 완료 — 760397 단건 검증 (구조 완성)
 
-- [ ] **BN Phase 2**: Per-BNFT 독립 중복제거 엔진 (driver 기반 가정 매칭)
-- [ ] **BN Phase 2**: DEFRY_RT/PRTT_RT/GRADIN_RT 자체 산출
-- [ ] **Premium/Benefit/Expense/Reserve/Discount/PV 단계**: projector.py 8단계 중 3~8단계
+- [x] **OD_EXP**: 13/16 PASS (DRVR=1/2/4 구현, DRVR=9/10 CNCTTP 이슈)
+- [x] **OD_CF**: 21/26 PASS (MN×PV+BN+EXP 결합)
+- [x] **OD_PVCF**: 22/27 PASS (CF×DC_RT 기시/기말)
+- [x] **OP_BEL**: 21/26 PASS (PVCF 합산)
+
+### 잔여 이슈 (FAIL 항목)
+
+- [ ] **EXP DRVR=9/10**: CNCTTP_ACUMAMT_KICS가 LTRMNAT_TMRFND에 물려있어 불일치 → MNT KD3/5/15
+- [ ] **ACQS KD2**: t=14 근처 rate 전환 시 ~251 차이
+- [ ] **CF TMRFND_INPAY/PYEX**: 공식 미확인
+- [ ] **전건 테스트**: EXP~BEL 단계 전건 검증 미실시 (760397 단건만)
 
 ---
 

@@ -82,6 +82,11 @@ class RawAssumptionLoader:
         """
         self.conn = conn
         self.p = prefix  # 테이블 접두사
+        # (prod,cls,cov) 기준 캐시 — 계약 무관 데이터
+        self._cache_risk_codes = {}       # (prod,cls,cov) -> List[RiskInfo]
+        self._cache_invld = {}            # (prod,cls,cov) -> Dict[str,int]
+        self._cache_exit_flags = {}       # (prod,cls,cov) -> Dict[str,Dict]
+        self._cache_extra_risks = {}      # (prod,cls,cov, frozenset(existing)) -> List[RiskInfo]
 
     # ------------------------------------------------------------------
     # 계약 정보 로드
@@ -141,6 +146,9 @@ class RawAssumptionLoader:
         IP_R_COV_RSKRT_C에는 일부 코드만 있고, IP_R_RSKRT_C에 전체가 있음.
         111018 같은 코드는 IP_R_COV_RSKRT_C에 없지만 IP_R_RSKRT_C에 존재.
         """
+        key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
+        if key in self._cache_risk_codes:
+            return self._cache_risk_codes[key]
         rows = self.conn.execute(f"""
             SELECT r.RSK_RT_CD,
                    chr.RSK_RT_CHR_CD,
@@ -179,6 +187,7 @@ class RawAssumptionLoader:
                 rsk_grp_no=str(r[4]) if r[4] is not None else "0",
                 def_cds=def_cds,
             ))
+        self._cache_risk_codes[key] = result
         return result
 
     # ------------------------------------------------------------------
@@ -489,6 +498,9 @@ class RawAssumptionLoader:
     # ------------------------------------------------------------------
     def load_invld_months(self, ctr: ContractInfo) -> Dict[str, int]:
         """위험률코드별 면책기간(월)."""
+        key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
+        if key in self._cache_invld:
+            return self._cache_invld[key]
         rows = self.conn.execute(f"""
             SELECT RSK_RT_CD, INVLD_TRMNAT_PRD_TPCD, INVLD_TRMNAT_PRD_CNT
             FROM {self.p}IP_R_INVLD_TRMNAT
@@ -502,6 +514,7 @@ class RawAssumptionLoader:
             cnt = int(r[2]) if r[2] else 0
             months = cnt * 12 if tpcd == "Y" else cnt
             result[rsk_cd] = months
+        self._cache_invld[key] = result
         return result
 
     # ------------------------------------------------------------------
@@ -518,6 +531,14 @@ class RawAssumptionLoader:
         Returns:
             {rsk_cd: {"rsvamt": 0|1, "bnft": 0|1, "pyexsp": 0|1}}
         """
+        key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
+        if key in self._cache_exit_flags:
+            # 캐시 결과 + risks에 있는 코드 보강
+            cached = self._cache_exit_flags[key]
+            rsk_cds = [r.risk_cd for r in risks]
+            result = {cd: cached.get(cd, {"rsvamt": 0, "bnft": 0, "pyexsp": 0}) for cd in rsk_cds}
+            return result
+
         rsk_cds = [r.risk_cd for r in risks]
         flags = {cd: {"rsvamt": 0, "bnft": 0, "pyexsp": 0} for cd in rsk_cds}
 
@@ -555,6 +576,7 @@ class RawAssumptionLoader:
             # BNFT exit = DRPO=1 AND 최소 하나의 BNFT_NO에서 RSKRT_YN=0
             flags[cd]["bnft"] = 1 if (bnft_drpo == 1 and min_rskrt_yn == 0) else 0
 
+        self._cache_exit_flags[key] = flags
         return flags
 
     # ------------------------------------------------------------------
@@ -575,6 +597,10 @@ class RawAssumptionLoader:
         Returns:
             추가 RiskInfo 리스트 (unique rsk_grp_no 부여)
         """
+        cache_key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd, frozenset(existing_cds))
+        if cache_key in self._cache_extra_risks:
+            return self._cache_extra_risks[cache_key]
+
         extra_cds = set()
         for tbl in ("IP_R_COV_RSKRT_C", "IP_R_BNFT_RSKRT_C"):
             rows = self.conn.execute(f"""
@@ -621,4 +647,5 @@ class RawAssumptionLoader:
                     dead_rt_dvcd=0, rsk_grp_no=f"__{rsk_cd}__",
                 ))
 
+        self._cache_extra_risks[cache_key] = result
         return result
