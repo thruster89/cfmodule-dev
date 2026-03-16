@@ -22,14 +22,33 @@ python -m cf_module.run --idno 760397 -o my_output
 
 출력: `output/{idno}_{테이블}.csv` (RSK_RT, LAPSE_RT, TBL_MN, TRAD_PV, TBL_BN, EXP, CF, DC_RT, PVCF, BEL)
 
+### 배치 실행
+
+```bash
+# 전건 BEL 산출 → DuckDB
+python run_batch_bel.py                    # 42,001건 → output_bel.duckdb (~3분)
+python run_batch_bel.py --n 1000           # 1000건만
+python run_batch_bel.py -o result.duckdb   # 출력 경로 지정
+
+# 전건 검증
+python test_bel_prem_base.py --all         # PREM_BASE 42,001건
+```
+
 ---
 
 ## 파이프라인 구조
 
 ```
 RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT → PVCF → BEL
-  ✅        ✅         ✅        ✅      ✅(16/16) 13/16  21/26   ✅    22/27  21/26
+ 100%     100%      100%     100%     100%      79.7% 83.8% 100%   —     —
 ```
+
+### 전건 검증 결과 (42,000건 OP_BEL 기대값 비교)
+
+- **11컬럼 100% PASS**: PREM_ADD, INSUAMT_PENS, ACQSEXP_INDR/REDEM, MNTEXP_INDR, HAFWDR 등
+- **4컬럼 99%+**: INSUAMT_GEN(99.6%), DRPO_PYRV(99.6%), LOSS_SVYEXP(99.9%)
+- **4컬럼 80%+**: PREM_BASE(83.8%), INSUAMT_MATU(78.5%), ACQSEXP_DR(79.7%)
+- **7컬럼 미구현**: TMRFND(4.8%), MNTEXP_DR(0%), BEL(0%)
 
 ### 의존성
 
@@ -59,9 +78,20 @@ RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT �
 
 ## 검증 방법
 
-### 기대값 위치
-- **전건** (42,001건): `duckdb_transform.duckdb` 내 OD_RSK_RT, OD_LAPSE_RT, OD_TBL_MN, OD_TRAD_PV, OD_TBL_BN
-- **단건** (760397): OD_EXP, OD_CF, OD_DC_RT, OD_PVCF, OP_BEL
+### 기대값 위치 (duckdb_transform.duckdb)
+
+| 테이블 | IDNO 수 | 비고 |
+|--------|---------|------|
+| OD_RSK_RT | 42,001 | 전건 |
+| OD_LAPSE_RT | 42,001 | 전건 |
+| OD_TBL_MN | 42,001 | 전건 |
+| OD_TRAD_PV | 42,001 | 전건 |
+| OD_TBL_BN | 32,963 | BN 매핑 있는 계약만 |
+| OD_EXP | 1 (760397) | 단건만 |
+| OD_CF | 1 (760397) | 단건만 |
+| OD_DC_RT | 1 (760397) | 단건만 |
+| OD_PVCF | 1 (760397) | 단건만 |
+| OP_BEL | 42,000 | 전건 (최종 결과) |
 
 ### 단건 검증 스크립트 패턴
 
@@ -92,13 +122,15 @@ for row in expected:
 con.close()
 ```
 
-### 기존 전건 테스트
+### 전건 테스트
 
 ```bash
-python test_rsk_lapse_rt.py      # RSK_RT + LAPSE_RT 단건
-python test_lapse_rt_all.py      # LAPSE_RT 42,001건
-python test_trad_pv_all.py       # TRAD_PV 42,000건
-python test_tbl_bn_phase2.py --all  # TBL_BN 32,963건
+python test_rsk_lapse_rt.py            # RSK_RT + LAPSE_RT 단건 (760397)
+python test_lapse_rt_all.py            # OD_LAPSE_RT 42,001건 ALL PASS
+python test_trad_pv_all.py             # OD_TRAD_PV 42,000건 ALL PASS
+python test_tbl_bn_phase2.py --all     # OD_TBL_BN 32,963건 16/16 PASS
+python test_bel_prem_base.py --all     # OP_BEL PREM_BASE 42,001건
+python run_batch_bel.py                # OP_BEL 전건 산출 → output_bel.duckdb
 ```
 
 ---

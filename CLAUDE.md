@@ -6,224 +6,156 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-보험 Cash Flow 프로젝션 엔진. `duckdb_transform.duckdb`(75개 raw 테이블)에서 보험상품 가정을 직접 읽어, 계리 계산(사망률, 해약률, 스큐, 중복제거 위험률)을 수행하여 CF를 산출한다.
+보험 Cash Flow 프로젝션 엔진. `duckdb_transform.duckdb`(75개 raw 테이블)에서 보험상품 가정을 직접 읽어, 계리 계산(사망률, 해약률, 스큐, 중복제거 위험률)을 수행하여 CF → PV → BEL을 산출한다.
 
-**핵심 원칙**: v2 ETL(v2/etl.py)을 거치지 않고, input DB(duckdb_transform.duckdb)의 raw 테이블에서 legacy 드라이버 기반 키매칭을 직접 수행하여 PROJ_O2.vdb와 동일한 결과 테이블을 구현한다. v2 Star Schema(fact 테이블)는 사용하지 않음.
+**핵심 원칙**: v2 ETL(v2/etl.py)을 거치지 않고, input DB의 raw 테이블에서 legacy 드라이버 기반 키매칭을 직접 수행하여 모델 산출값과 동일한 결과를 구현한다.
 
 ## Key Dependencies
 
 - Python 3, pandas, numpy (core)
-- sqlite3 (built-in, v1 primary database)
 - duckdb (raw 테이블 직접 조회)
 
 ## Running
 
 ```bash
-# OD_RSK_RT / OD_LAPSE_RT 단건 검증 (IDNO=760397)
-python test_rsk_lapse_rt.py
+# 단건 전체 파이프라인 (RSK_RT → BEL, 10개 CSV 출력)
+python -m cf_module.run --idno 760397
 
-# OD_LAPSE_RT 전건 검증 (42,001건)
-python test_lapse_rt_all.py
+# 특정 단계까지만
+python -m cf_module.run --idno 760397 --table MN
+python -m cf_module.run --idno 760397 --table CF
 
-# OD_TRAD_PV 전건 검증 (42,000건 × 43컬럼)
-python test_trad_pv_all.py
+# 상세 출력
+python -m cf_module.run --idno 760397 --debug
 
-# OD_TBL_BN Phase 2 전건 검증 (32,963건 × 72,798 BNFT)
-python test_tbl_bn_phase2.py --all
+# 전건 배치 BEL 산출 (42,001건 → DuckDB)
+python run_batch_bel.py
+python run_batch_bel.py --n 1000 -o result.duckdb
 
-# v1 단건 테스트 (기본 IDNO=8833)
-python test_single_contract.py
-
-# v1 특정 계약 테스트
-python test_single_contract.py --idno 760397
-
-# v1 메인 파이프라인
-python -m cf_module.main --sample 500
+# 전건 검증 테스트
+python test_bel_prem_base.py --all        # OP_BEL PREM_BASE 42,001건
+python test_lapse_rt_all.py               # OD_LAPSE_RT 42,001건
+python test_trad_pv_all.py                # OD_TRAD_PV 42,000건
+python test_tbl_bn_phase2.py --all        # OD_TBL_BN 32,963건
 ```
 
-## Architecture — 산출 모듈 (현재 활성)
-
-### OD_RSK_RT (위험률 산출) — 42,001건 ALL PASS
-
-| 파일 | 역할 |
-|------|------|
-| `data/rsk_lapse_loader.py` | RawAssumptionLoader: 드라이버 키매칭 (15차원 ASSM_DIV_VAL) |
-| `calc/tbl_rsk_rt.py` | compute_rsk_rt: 원율 → BEPRD → 월변환 → 면책 적용 |
-| `test_rsk_lapse_rt.py` | PROJ_O2.vdb 기대값 비교 (7 risk × 9 col × 345 steps) |
-
-**핵심 공식**:
-- 경과년수: `ceil(months/12)` = `max((duration_months - 1) // 12 + 1, 1)`
-- 연령: `entry_age + max(duration_months - 1, 0) // 12`
-- BF_YR = RSK_RT × LOSS_RT × MTH_EFECT × BEPRD × TRD × ARVL
-- 월변환(mm_trf_way_cd=1): `1 - (1 - bf_yr)^(1/12)`
-- 월변환(mm_trf_way_cd=2): `bf_yr / 12`
-- 면책: `duration_months < invld_mm` → 0
-
-### OD_LAPSE_RT (해지율 산출) — 42,001건 × 3컬럼 ALL PASS
-
-| 파일 | 역할 |
-|------|------|
-| `data/rsk_lapse_loader.py` | load_lapse_rates: KDCD=12(납입중)/13(납입후) 드라이버 매칭 |
-| `calc/tbl_lapse_rt.py` | compute_lapse_rt: 납입중/납입후 선택 → SKEW(1/12) → APLY |
-| `test_lapse_rt_all.py` | duckdb OD_LAPSE_RT 기대값 42,001건 전건 비교 |
-
-**핵심 규칙**:
-- SKEW = 1/12 상수 (IA_T_SKEW 월별 가중치와 무관 — OD_LAPSE_RT는 단순 월환산만)
-- 납입중/납입후 전환: **MAIN_PAYPR_YYCNT**(주계약 납입기간) 기준, PAYPR_YYCNT(특약) 아님
-- `is_paying = duration_months <= main_pterm_months` (pterm월 포함 = 납입중)
-- 납입후 경과: `paidup_months = duration_months - main_pterm_months` (납입후 기준 상대 경과)
-- Paying 연장: 마지막 데이터 컬럼(RT20) 값 유지 (RT20=0이면 0 연장)
-- 만기도래: `elapsed >= bterm_months` → TRMNAT=0, SKEW=0, APLY=0 (9건)
-- APLY = `1 - (1 - TRMNAT_RT)^(1/12)`
-
-### OD_TRAD_PV (전통형 현가) — 42,000건 × 43컬럼 ALL PASS
-
-| 파일 | 역할 |
-|------|------|
-| `calc/trad_pv.py` | 7단계 산출 (보험료→PRPD→이율→적립금→환급금→KICS→약관대출) |
-| `data/trad_pv_loader.py` | TradPVDataCache: 12개 테이블 일괄 로드 |
-| `test_trad_pv_all.py` | 전건 검증 |
-
-### OD_TBL_BN (급부 테이블) — 32,963건 × 72,798 BNFT (16/16 PASS)
-
-| 파일 | 역할 |
-|------|------|
-| `calc/tbl_bn.py` | Per-BNFT 독립 C행렬 dedup → tpx → 탈퇴자/발생건 → PYAMT |
-| `data/bn_loader.py` | 9개 참조테이블 로드 (risk_meta, rsvamt_flags, expct_inrt_prtt) |
-| `test_tbl_bn_phase2.py` | Phase 2 전건 검증 (raw OD_RSK_RT/OD_LAPSE_RT 입력) |
-
-**PRTT_RT 산출 (ann_due 기반)**:
-- `PRTT_RT = DEFRY_RT × ann_due(TOT, rate, CYC) × (CD==1 ? v² : 1)`
-- CD=1: EXPCT_INRT×v²(2개월이연), CD=3: AVG_PUBANO_INRT, CD=4: min(EXPCT, AVG_PUBANO)
-
-### OD_EXP (사업비) — 13/16 PASS (760397 단건)
-
-| 파일 | 역할 |
-|------|------|
-| `calc/exp.py` | DRVR별 사업비 산출 (GPREM/절대금액/BNFT/LOAN/KICS 기반) |
-| `data/exp_loader.py` | IA_E_ACQSEXP_DR/MNTEXP_DR/LOSS_SVYEXP + 드라이버 키매칭 |
-
-### OD_CF (캐시플로우) — 21/26 PASS (760397 단건)
-
-| 파일 | 역할 |
-|------|------|
-| `calc/cf.py` | MN×TRAD_PV(보험료) + BN(보험금) + MN×EXP(사업비) 결합 |
-
-### OD_DC_RT (할인율) — 2/2 ALL PASS
-
-| 파일 | 역할 |
-|------|------|
-| `calc/dc_rt.py` | IE_DC_RT 커브 → v=(1+r)^(-1/12) → 기시(TRMO)/기말(TRME) 누적곱 |
-
-### OD_PVCF (현가 캐시플로우) — 22/27 PASS
-
-| 파일 | 역할 |
-|------|------|
-| `calc/pvcf.py` | CF × DC_RT (기시: 보험료/사업비, 기말: 보험금/해약) |
-
-### OP_BEL (최선추정부채) — 21/26 PASS
-
-| 파일 | 역할 |
-|------|------|
-| `calc/bel.py` | PVCF 전 시점 합산 → BEL |
-
-### 전체 파이프라인
-
-| 파일 | 역할 |
-|------|------|
-| `pipeline.py` | run_pipeline: RSK→LAPSE→MN→PV→BN 전체 배치 |
-| `run.py` | run_single/run_batch: 단건/다건 파이프라인 + CSV 출력 |
-
-**파이프라인 체인**: `RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT → PVCF → BEL`
-
-### RawAssumptionLoader 드라이버 키매칭
-
-**데이터 흐름**:
-```
-II_INFRC (계약 정보, ASSM_DIV_VAL1~15, RSK_RT_DIV_VAL1~10)
-  → IA_M_ASSM_DRIV (활성 차원: ASSM_DIV_VAL_YN 0=무시, 1=ETC매핑, 2=원본유지)
-    → IA_M_ETC_ASSM_KEY (ASSM_GRP_CD 매핑)
-    → IA_M_PROD_GRP (상품그룹 매핑)
-  → IA_T_TRMNAT (해지율), IR_RSKRT_VAL (위험률), IA_T_SKEW (스큐) 등
-```
-
-**ContractInfo 주요 필드**:
-- `pterm_yy`: PAYPR_YYCNT (특약 납입기간)
-- `main_pterm_yy`: MAIN_PAYPR_YYCNT (주계약 납입기간) — **해지율 paying/paidup 판정용**
-- `bterm_yy`: INSTRM_YYCNT (보험기간)
-
-## Architecture (ver1.1) — 기존 v1 프레임워크
-
-### Data Flow
+## Architecture — 파이프라인 (10단계)
 
 ```
-CFConfig (config.py)
-  → DataReader (io/reader.py) + queries/*.sql (60개 개별 SQL)
-    → ModelPointSet (data/model_point.py)         ← II_INFRC
-    → AssumptionLoader (data/assumptions.py)      ← IR_RSKRT_*, IA_*, IP_R_*
-      → AssumptionKeyBuilder (data/assm_key_builder.py)  ← 복합키 매칭
-    → TimingResult (calc/timing.py)
-    → DecrementResult (calc/decrement.py)         ← 중복제거 위험률
-    → run_projection (projection/projector.py)    ← CF 산출
+RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT → PVCF → BEL
 ```
 
-### 중복제거 위험률 (calc/decrement.py)
+### 단계별 모듈
 
-**공식**: `q'ᵢ = qᵢ × (1 - Σⱼ(qⱼ × Cᵢⱼ) / 2)`
+| 단계 | calc/ | data/ | 입력 | 전건 PASS율 |
+|------|-------|-------|------|-----------|
+| RSK_RT | tbl_rsk_rt.py | rsk_lapse_loader.py | IR_RSKRT_VAL, IA_M_ASSM_DRIV | 100% |
+| LAPSE_RT | tbl_lapse_rt.py | rsk_lapse_loader.py | IA_T_TRMNAT, IA_T_SKEW | 100% |
+| TBL_MN | tbl_mn.py | — | RSK_RT, LAPSE_RT | 100% |
+| TRAD_PV | trad_pv.py | trad_pv_loader.py | TBL_MN, II_RSVAMT_BAS, IP_P_* | 100% |
+| TBL_BN | tbl_bn.py | bn_loader.py | RSK_RT, LAPSE_RT, TRAD_PV | 100% (16컬럼) |
+| EXP | exp.py | exp_loader.py | IA_E_ACQSEXP/MNTEXP/LOSS, TRAD_PV | 79.7% |
+| CF | cf.py | — | TBL_MN, TRAD_PV, TBL_BN, EXP | 83.8% |
+| DC_RT | dc_rt.py | — | IE_DC_RT | 100% |
+| PVCF | pvcf.py | — | CF, DC_RT | — |
+| BEL | bel.py | — | PVCF | — |
 
-C행렬 조건 (Cᵢⱼ = 0):
-1. 자기자신 (i = j)
-2. 동일위험그룹 (RSK_GRP_NO 동일)
-3. j가 사망위험 (DEAD_RT_DVCD = 0)
+### 파이프라인 실행 (run.py)
 
-**탈퇴 위험률 분류**:
-- CTR (유지자): is_exit = RSVAMT_YN | BNFT_YN
-- PAY (납입자): is_exit = RSVAMT_YN | BNFT_YN | PYEXSP_YN
+| 파일 | 역할 |
+|------|------|
+| `run.py` | run_single: 단건 전체 파이프라인 + CSV 출력 |
+| `run_batch_bel.py` | 전건 BEL 배치 산출 → DuckDB 출력 |
+| `pipeline.py` | run_pipeline: RSK→LAPSE→MN→PV→BN 배치 (레거시) |
 
-### 검증 데이터
+### 데이터 로더 + 캐시 최적화
 
-- `duckdb_transform.duckdb`: 42,001건 raw 데이터 + OD_RSK_RT, OD_LAPSE_RT 기대값
-- `PROJ_O2.vdb` (`C:\python\cf_module\PROJ_O2.vdb`): INFRC_IDNO=760397 기대값
-  - OD_RSK_RT, OD_LAPSE_RT, OD_TBL_MN (CTR_* / PAY_* 컬럼, 345행)
+| 로더 | 캐시 전략 | 단건/배치 |
+|------|----------|----------|
+| RawAssumptionLoader | 드라이버 사전로드 + resolve/data 캐시, preload_contracts() | 건당 2.9ms |
+| TradPVDataCache | 단건: idno_filter(POLNO그룹만), 배치: 전건 | 1.1s/0.05s |
+| BNDataCache | 단건: pcv_filter(해당 상품만), 배치: 전건 | 20s/0.2s |
+| ExpDataCache | 사전 인덱스(_prod_cls_grp, _dim5_map, _items_cache) | <0.1s |
+
+### RSK_RT DIV_VAL 매핑
+
+**IP_P_COV 기반 동적 매핑** (하드코딩 아님):
+```
+IP_P_COV.RSK_RT_DIV_VAL_DEF_CD[i] = code → II_INFRC.RSK_RT_DIV_VAL[i] = value
+IR_RSKRT_CHR.DEF_CD[pos] = code → IP_P_COV에서 code 위치 찾기 → INFRC 값 사용
+```
+- 1~6: 고정 (49,21,22,03,70,71)
+- 7~10: 상품별 가변 (45 등)
+
+### PRTT_RT 산출
+
+```
+PRTT_RT = DEFRY_RT × ann_due(TOT, rate, CYC) × (CD==1 ? v² : 1)
+```
+- CD=1: EXPCT_INRT × v²(2개월이연), CD=3: AVG_PUBANO_INRT, CD=4: min(EXPCT, AVG_PUBANO)
+- 소스: IP_B_PRTT_BNFT_RT (파라미터), IP_P_EXPCT_INRT (이율)
+
+### CF 공식
+
+| 컬럼 | 공식 |
+|------|------|
+| PREM_BASE | CTR_TRMO × ORIG_PREM × PREM_PAY_YN |
+| PREM_PYEX | (CTR_TRME[s-1] - PAY_TRME[s-1]) × ORIG_PREM × PAY_YN |
+| DRPO_PYRV | CTR_RSVAMT_DEFRY_DRPSN × APLY_PREM_ACUMAMT_BNFT |
+| INSUAMT_GEN | Σ BN.BNFT_INSUAMT |
+| TMRFND | CTR_TRMPSN × CNCTTP_ACUMAMT_KICS |
+| ACQSEXP_DR | Σ(ACQS_item × TRMO) — PAY_DVCD로 CTR/PAY 선택 |
+| MNTEXP_DR | Σ(MNT_item × TRMO) |
+| LOSS_SVYEXP | LSVY_rate × Σ BNFT_INSUAMT |
+
+### EXP DRVR 코드
+
+| DRVR | 기초금액 | 비고 |
+|------|---------|------|
+| 1 | RATE[t] × GPREM | t=CTR_AFT_PASS_MMCNT 월 인덱스 |
+| 2 | AMOUNT[t] × 물가상승 | PRCE_ASC=1일 때 IE_INFL 적용 |
+| 4 | 고정값 | BNFT_INSUAMT 대비 |
+| 6 | RATE[t] × LOAN_REMAMT | |
+| 9 | RATE[t] × CNCTTP_ACUMAMT_KICS | CNCTTP 이슈 있음 |
+| 10 | RATE[t] × (CNCTTP - LOAN) | |
+
+### PVCF 기시/기말 할인
+
+- **기시(TRMO)**: PREM, PYEX, ACQSEXP, MNTEXP
+- **기말(TRME)**: TMRFND, DRPO, INSUAMT, LOSS_SVYEXP
 
 ## Current Status
 
-### 완료 — 전건 검증 PASS
+### 전건 검증 결과 (42,000건 OP_BEL 비교)
 
-- [x] **OD_RSK_RT**: 42,001건 × 9컬럼 ALL PASS
-- [x] **OD_LAPSE_RT**: 42,001건 × 3컬럼 ALL PASS
-- [x] **OD_TRAD_PV**: 42,000건 × 43컬럼 ALL PASS
-- [x] **OD_TBL_MN**: 42,001건 × 18컬럼 ALL PASS
-- [x] **OD_TBL_BN**: 16/16컬럼 PASS (PRTT_RT CD=1/3/4 구현 완료)
-- [x] **OD_DC_RT**: 2/2컬럼 ALL PASS
+**100% PASS (11컬럼)**: PREM_ADD, INSUAMT_PENS, ACQSEXP_INDR, ACQSEXP_REDEM, MNTEXP_INDR, IV_MGMEXP_MNTEXP_CCRFND, HAFWDR, LOAN_NEW, LOAN_RPAY_MATU, PREM_ACUM_RSVAMT_ALTER, PREM_ADD_ACUMAMT_DEPL
 
-### 완료 — 760397 단건 검증 (구조 완성)
+**99%+ PASS (4컬럼)**: INSUAMT_GEN(99.6%), DRPO_PYRV(99.6%), LOSS_SVYEXP(99.9%), INSUAMT_HAFWAY(99.7%)
 
-- [x] **OD_EXP**: 13/16 PASS (DRVR=1/2/4 구현, DRVR=9/10 CNCTTP 이슈)
-- [x] **OD_CF**: 21/26 PASS (MN×PV+BN+EXP 결합)
-- [x] **OD_PVCF**: 22/27 PASS (CF×DC_RT 기시/기말)
-- [x] **OP_BEL**: 21/26 PASS (PVCF 합산)
+**80%+ PASS (4컬럼)**: PREM_BASE(83.8%), PREM_PYEX(84.5%), INSUAMT_MATU(78.5%), ACQSEXP_DR(79.7%)
 
-### 잔여 이슈 (FAIL 항목)
+**미구현 (7컬럼)**: TMRFND(4.8%), MNTEXP_DR(0%), BEL(0%), LOAN_ASET(0%), LOAN_INT(90.4%), LOAN_RPAY_HAFWAY(90.4%), IV_MGMEXP_CL_REMAMT(91.6%)
 
-- [ ] **EXP DRVR=9/10**: CNCTTP_ACUMAMT_KICS가 LTRMNAT_TMRFND에 물려있어 불일치 → MNT KD3/5/15
-- [ ] **ACQS KD2**: t=14 근처 rate 전환 시 ~251 차이
-- [ ] **CF TMRFND_INPAY/PYEX**: 공식 미확인
-- [ ] **전건 테스트**: EXP~BEL 단계 전건 검증 미실시 (760397 단건만)
+### 잔여 이슈
 
----
+| 순위 | 항목 | 영향 | FAIL 건수 |
+|------|------|------|----------|
+| 1 | CNCTTP 산출 분리 (LTRMNAT 의존 제거) | TMRFND+MNTEXP_DR+BEL | 40,000+ |
+| 2 | INSUAMT_MATU 구현 | 만기보험금 | 9,033 |
+| 3 | PAY_STCD=3 보험료 처리 | PREM_BASE/PYEX | 6,803 |
+| 4 | ACQSEXP_DR 매칭 확대 | 사업비 | 8,533 |
+| 5 | 대출 CF (LOAN_INT 등) | 대출 관련 | 4,042 |
 
-<details>
-<summary>v2 아키텍처 (현재 비활성 — 참고용)</summary>
+### 성능
 
-v2는 초기 프로토타입으로, 현재는 raw 테이블 직접 조회 방식으로 전환됨. 코드는 `v2/` 디렉토리에 남아있으나 활성 개발 대상 아님.
-
-| 모듈 | 역할 |
+| 구분 | 시간 |
 |------|------|
-| `v2/schema.py` | DuckDB Star Schema DDL |
-| `v2/etl.py` | Legacy SQLite → DuckDB 변환 |
-| `v2/engine.py` | 중복제거 + tpx + 탈퇴자 분해 |
+| 단건 전체 파이프라인 | 0.3s |
+| 건당 (배치, 캐시 후) | 2.9ms |
+| 42,001건 배치 | ~3분 |
 
-테스트: `test_v2_real.py`, `test_v2_vs_proj_o2.py`, `python -m cf_module.v2.test_v2`
+## 문서
 
-</details>
+- `docs/pipeline_flow.md`: 파이프라인 상세 흐름도
+- `docs/dev_guide.md`: 개발 가이드 (미구현 항목 해결 방법)
+- `docs/bel_comparison_report.md`: OP_BEL 전건 비교 검증 보고서
