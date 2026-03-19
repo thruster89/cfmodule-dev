@@ -31,9 +31,13 @@ python -m cf_module.run --idno 760397 --debug
 # 디버그: 특정 테이블만 선택 저장
 python -m cf_module.run --idno 760397 --debug --save RSK_RT,CF,BEL
 
-# 전건 배치 BEL 산출 (42,001건 → DuckDB)
-python run_batch_bel.py
+# 전건 배치 BEL 산출 (청크 기반 + 실행번호 관리)
+python run_batch_bel.py                          # 전건 산출 → output_bel.duckdb
 python run_batch_bel.py --n 1000 -o result.duckdb
+python run_batch_bel.py --reset                  # 기존 결과 삭제 후 재실행
+python run_batch_bel.py --reset-run 3            # 특정 RUN_ID만 삭제 후 재실행
+python run_batch_bel.py --preload                # 전건 캐시 프리로드 (메모리 충분 시)
+python run_batch_bel.py --chunk 3000             # 청크 크기 조정 (기본 5000)
 
 # 전건 검증 테스트
 python test_bel_prem_base.py --all        # OP_BEL PREM_BASE 42,001건
