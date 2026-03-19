@@ -149,12 +149,12 @@ def _worker_process(task):
     """멀티프로세스 워커. 상품 그룹 리스트를 받아 처리 후 결과 반환.
 
     Args:
-        task: (db_path, worker_id, group_assignments, dc_curve, preload)
+        task: (db_path, worker_id, group_assignments, dc_curve)
               group_assignments = [((prod, cov), [idno, ...]), ...]
     Returns:
         (worker_id, rows, ok_count, err_count, err_msgs)
     """
-    db_path, worker_id, group_assignments, dc_curve, preload = task
+    db_path, worker_id, group_assignments, dc_curve = task
 
     con = duckdb.connect(db_path, read_only=True)
     loader = RawAssumptionLoader(con)
@@ -165,13 +165,6 @@ def _worker_process(task):
     loader.preload_contracts(idnos=all_worker_ids)
     exp_cache = ExpDataCache(con)
 
-    if preload:
-        trad_cache_all = TradPVDataCache(con)
-        bn_cache_all = BNDataCache(con)
-    else:
-        trad_cache_all = None
-        bn_cache_all = None
-
     rows = []
     ok = err = 0
     err_msgs = []
@@ -180,12 +173,8 @@ def _worker_process(task):
         if not group_ids:
             continue
 
-        if preload:
-            trad_cache = trad_cache_all
-            bn_cache = bn_cache_all
-        else:
-            trad_cache = TradPVDataCache(con, idno_filter=set(group_ids))
-            bn_cache = BNDataCache(con, pcv_filter=[(prod, cov)])
+        trad_cache = TradPVDataCache(con, idno_filter=set(group_ids))
+        bn_cache = BNDataCache(con, pcv_filter=[(prod, cov)])
 
         for idno in group_ids:
             try:
@@ -308,9 +297,9 @@ def _run_single_process(con, pcv_groups, loader, exp_cache, dc_curve,
 # 멀티프로세스 모드
 # ---------------------------------------------------------------------------
 
-def _run_multi_process(db_path, pcv_groups, dc_curve, preload, n_workers,
+def _run_multi_process(db_path, pcv_groups, dc_curve, n_workers,
                        run_id, out_con):
-    """멀티프로세스 병렬 실행."""
+    """멀티프로세스 병렬 실행. 워커별 상품그룹 캐시 로드."""
     distribution = _distribute_groups(pcv_groups, n_workers)
 
     total_target = sum(len(ids) for ids in pcv_groups.values())
@@ -322,7 +311,7 @@ def _run_multi_process(db_path, pcv_groups, dc_curve, preload, n_workers,
     # 워커 태스크 생성
     tasks = []
     for wid, (assignments, load) in distribution.items():
-        tasks.append((db_path, wid, assignments, dc_curve, preload))
+        tasks.append((db_path, wid, assignments, dc_curve))
 
     # 병렬 실행
     t_start = time.time()
@@ -373,7 +362,7 @@ def main():
     parser.add_argument("--reset-run", type=int, default=None,
                         help="특정 실행번호 결과만 삭제 후 재실행")
     parser.add_argument("--preload", action="store_true",
-                        help="전건 캐시 프리로드 (메모리 충분 시, 워커별 독립 로드)")
+                        help="전건 캐시 프리로드 (단일프로세스 전용, --workers 1)")
     args = parser.parse_args()
 
     # 워커 수 결정
@@ -381,6 +370,12 @@ def main():
     if n_workers is None:
         n_workers = max(1, mp.cpu_count() - 1)
     n_workers = max(1, n_workers)
+
+    # --preload는 단일프로세스 전용
+    if args.preload and n_workers > 1:
+        print("ERROR: --preload는 단일프로세스(--workers 1) 전용입니다.")
+        print("  멀티프로세스는 상품그룹별 캐시를 자동 사용합니다.")
+        return 1
 
     con = duckdb.connect(args.db, read_only=True)
 
@@ -447,7 +442,7 @@ def main():
 
         if not args.preload:
             dc_curve_rows = con.execute(
-                "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
+                "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
             ).fetchall()
             dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
         else:
@@ -462,12 +457,12 @@ def main():
         # 멀티프로세스 모드
         # dc_curve 미리 로드 (직렬화용)
         dc_curve_rows = con.execute(
-            "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
+            "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
 
         ok, err = _run_multi_process(
-            args.db, pcv_groups, dc_curve, args.preload, n_workers,
+            args.db, pcv_groups, dc_curve, n_workers,
             run_id, out_con)
 
     total_time = time.time() - t_total
