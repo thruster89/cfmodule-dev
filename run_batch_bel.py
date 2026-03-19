@@ -382,6 +382,11 @@ def main():
         n_workers = max(1, mp.cpu_count() - 1)
     n_workers = max(1, n_workers)
 
+    # --preload + 멀티프로세스: 워커마다 전건 캐시 → 메모리 N배
+    if args.preload and n_workers > 1:
+        print(f"WARNING: --preload + {n_workers}워커 = 캐시 메모리 {n_workers}배 사용")
+        print("  메모리 부족 시 --preload 제거 또는 --workers 1 사용")
+
     con = duckdb.connect(args.db, read_only=True)
 
     # 출력 DB
