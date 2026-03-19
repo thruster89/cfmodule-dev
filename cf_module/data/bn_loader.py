@@ -2,6 +2,7 @@
 
 급부별 위험률 매핑, 지급률, 부담보 등 참조 데이터 일괄 로드.
 """
+import time
 from typing import Dict, List, Optional, Set, Tuple
 
 import duckdb
@@ -22,15 +23,25 @@ class BNDataCache:
             pcv_filter: (prod_cd, cov_cd) 튜플 리스트. 설정 시 해당 상품만 로드.
         """
         self._pcv_filter = pcv_filter
-        self._load_bnft_rskrt_c(conn)
-        self._load_bnft_bas(conn)
-        self._load_bnft_defry_rt(conn)
-        self._load_ncov(conn)
-        self._load_invld_trmnat(conn)
-        self._load_prtt_bnft_rt(conn)
-        self._load_expct_inrt_for_prtt(conn)
-        self._load_risk_meta(conn)
-        self._load_rsvamt_flags(conn)
+        t_total = time.perf_counter()
+        steps = [
+            ("BNFT_RSKRT_C", self._load_bnft_rskrt_c),
+            ("BNFT_BAS", self._load_bnft_bas),
+            ("BNFT_DEFRY_RT", self._load_bnft_defry_rt),
+            ("NCOV", self._load_ncov),
+            ("INVLD_TRMNAT", self._load_invld_trmnat),
+            ("PRTT_BNFT_RT", self._load_prtt_bnft_rt),
+            ("EXPCT_INRT", self._load_expct_inrt_for_prtt),
+            ("RISK_META", self._load_risk_meta),
+            ("RSVAMT_FLAGS", self._load_rsvamt_flags),
+        ]
+        for name, fn in steps:
+            t0 = time.perf_counter()
+            fn(conn)
+            elapsed = time.perf_counter() - t0
+            logger.info(f"  └ {name} load: {elapsed:.2f}s")
+        total = time.perf_counter() - t_total
+        logger.info(f"BNDataCache total load: {total:.2f}s")
 
     def _pcv_where(self, prefix="WHERE"):
         """pcv_filter 기반 SQL 조건절 생성."""

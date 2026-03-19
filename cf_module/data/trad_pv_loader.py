@@ -40,20 +40,27 @@ class TradPVDataCache:
             idno_filter: IDNO 집합. 설정 시 계약 테이블만 필터 (상품 테이블은 전건).
         """
         self._idno_filter = idno_filter
-        t0 = time.time()
-        self._load_infrc(conn)
-        self._load_rsvamt_bas(conn)
-        self._load_acum_cov(conn)
-        self._load_expct_inrt(conn)
-        self._load_bizexp_cmpt_crit(conn)
-        self._load_bizexp_rt(conn)
-        self._load_pubano_inrt(conn)
-        self._load_dc_rt(conn)
-        self._load_loan_tables(conn)
-        self._load_prod_loan_tpcd(conn)
-        self._load_ltrmnat(conn)
-        elapsed = time.time() - t0
-        logger.info(f"TradPVDataCache loaded in {elapsed:.2f}s "
+        t_total = time.perf_counter()
+        steps = [
+            ("INFRC", self._load_infrc),
+            ("RSVAMT_BAS", self._load_rsvamt_bas),
+            ("ACUM_COV", self._load_acum_cov),
+            ("EXPCT_INRT", self._load_expct_inrt),
+            ("BIZEXP_CMPT_CRIT", self._load_bizexp_cmpt_crit),
+            ("BIZEXP_RT", self._load_bizexp_rt),
+            ("PUBANO_INRT", self._load_pubano_inrt),
+            ("DC_RT", self._load_dc_rt),
+            ("LOAN_TABLES", self._load_loan_tables),
+            ("PROD_LOAN_TPCD", self._load_prod_loan_tpcd),
+            ("LTRMNAT", self._load_ltrmnat),
+        ]
+        for name, fn in steps:
+            t0 = time.perf_counter()
+            fn(conn)
+            elapsed = time.perf_counter() - t0
+            logger.info(f"  └ {name} load: {elapsed:.2f}s")
+        total = time.perf_counter() - t_total
+        logger.info(f"TradPVDataCache loaded in {total:.2f}s "
                      f"(infrc={len(self.infrc)}, bas={len(self.rsvamt_bas)})")
 
     def _idno_sql(self, prefix="AND"):
