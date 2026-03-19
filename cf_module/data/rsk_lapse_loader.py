@@ -26,11 +26,10 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from cf_module.constants import FIXED_DEF_CD_MAP, NULL_MARKER
 
-# 1~6 고정 매핑 (fallback)
-_FIXED_DEF_CD_MAP = {
-    "49": 0, "21": 1, "22": 2, "03": 3, "70": 4, "71": 5,
-}
+# 하위 호환: 기존 코드가 _FIXED_DEF_CD_MAP 참조할 경우
+_FIXED_DEF_CD_MAP = FIXED_DEF_CD_MAP
 
 
 @dataclass

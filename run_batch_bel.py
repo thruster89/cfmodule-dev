@@ -33,6 +33,7 @@ from cf_module.data.exp_loader import ExpDataCache
 from cf_module.data.rsk_lapse_loader import RawAssumptionLoader
 from cf_module.data.trad_pv_loader import TradPVDataCache, build_contract_info_cached
 from cf_module.run import (
+    PipelineContext,
     compute_n_steps, _compute_mn_chain,
     _compute_trad_pv_single, _compute_bn_single, _compute_exp_single,
 )
@@ -98,38 +99,40 @@ def _reset_run(out_con, run_id=None):
 # 단건 산출 (배치용, 캐시 주입)
 # ---------------------------------------------------------------------------
 
-def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                  timings=None, polno_map=None, mn_cache=None):
+def _compute_one(ctx: PipelineContext, idno: int, timings=None):
     """BEL 1건 산출. 성공 시 dict, 실패 시 None.
 
-    timings: dict가 전달되면 단계별 누적 시간(초) 기록.
-    polno_map: POLNO 그룹 사전 매핑 (SQL 조회 생략용).
-    mn_cache: MN 결과 캐시 (그룹 내 중복 계산 방지용).
+    Args:
+        ctx: 파이프라인 공유 자원 (con, loader, caches, polno_map, mn_cache 등).
+        idno: 대상 계약 INFRC_IDNO.
+        timings: dict가 전달되면 단계별 누적 시간(초) 기록.
     """
     t0 = time.time()
 
-    ctr = loader.load_contract(idno)
+    ctr = ctx.loader.load_contract(idno)
     n_steps = compute_n_steps(ctr)
     t1 = time.time()
 
     # mn_cache에 이미 있으면 재사용
-    if mn_cache is not None and idno in mn_cache:
-        rsk_rt, lapse_rt, tbl_mn = mn_cache[idno]
+    if ctx.mn_cache is not None and idno in ctx.mn_cache:
+        rsk_rt, lapse_rt, tbl_mn = ctx.mn_cache[idno]
     else:
-        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(loader, ctr, n_steps)
-        if mn_cache is not None:
-            mn_cache[idno] = (rsk_rt, lapse_rt, tbl_mn)
+        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(ctx.loader, ctr, n_steps)
+        if ctx.mn_cache is not None:
+            ctx.mn_cache[idno] = (rsk_rt, lapse_rt, tbl_mn)
     t2 = time.time()
 
-    trad_pv = _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps,
-                                       polno_map=polno_map, mn_cache=mn_cache)
+    trad_pv = _compute_trad_pv_single(
+        ctx.con, ctx.loader, ctx.trad_cache, idno, tbl_mn, n_steps,
+        polno_map=ctx.polno_map, mn_cache=ctx.mn_cache)
     if not trad_pv:
         return None
     pv_d = trad_pv.to_dict()
     t3 = time.time()
 
     acum_bnft = pv_d.get("APLY_PREM_ACUMAMT_BNFT")
-    tbl_bn = _compute_bn_single(con, bn_cache, ctr, rsk_rt, lapse_rt, n_steps, acum_bnft)
+    tbl_bn = _compute_bn_single(
+        ctx.con, ctx.bn_cache, ctr, rsk_rt, lapse_rt, n_steps, acum_bnft)
 
     bn_insuamt = np.zeros(n_steps, dtype=np.float64)
     if tbl_bn:
@@ -137,11 +140,11 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
             bn_insuamt += br.bnft_insuamt
     t4 = time.time()
 
-    infrc_raw = trad_cache.infrc.get(idno, {})
+    infrc_raw = ctx.trad_cache.infrc.get(idno, {})
     gprem = infrc_raw.get("gprem") or infrc_raw.get("effective_gprem", 0)
     val5 = ctr.assm_divs[4] if len(ctr.assm_divs) > 4 else None
     exp_results, exp_items = _compute_exp_single(
-        exp_cache, ctr, n_steps, pv_d, gprem=gprem, val5=val5)
+        ctx.exp_cache, ctr, n_steps, pv_d, gprem=gprem, val5=val5)
     t5 = time.time()
 
     lsvy_rate = 0.0
@@ -151,7 +154,7 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
 
     cf = compute_cf(n_steps, tbl_mn, pv_d, bn_insuamt,
                     exp_results or [], exp_items or [], lsvy_rate)
-    dc = compute_dc_rt(n_steps, dc_curve)
+    dc = compute_dc_rt(n_steps, ctx.dc_curve)
     pvcf = compute_pvcf(cf, dc)
     bel = compute_bel(pvcf)
     t6 = time.time()
@@ -246,6 +249,7 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
     t_start = time.time()
     timings_all = {}
     mn_cache = {}  # {idno: (rsk_rt, lapse_rt, tbl_mn)} — 그룹 내 중복계산 방지
+    err_summary = {}  # {error_type: count} — 에러 카테고리화
 
     for ci in range(0, total_target, chunk_size):
         chunk = flat_list[ci:ci + chunk_size]
@@ -261,12 +265,17 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
             bn_cache = BNDataCache(con, pcv_filter=unique_pcv)
         cache_sec = time.time() - t_cache
 
+        # 청크별 PipelineContext 구성
+        ctx = PipelineContext(
+            con=con, loader=loader, trad_cache=trad_cache,
+            bn_cache=bn_cache, exp_cache=exp_cache, dc_curve=dc_curve,
+            polno_map=polno_map, mn_cache=mn_cache,
+        )
+
         timings_chunk = {}
         for idno in chunk_ids:
             try:
-                row = _compute_one(
-                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                    timings=timings_chunk, polno_map=polno_map, mn_cache=mn_cache)
+                row = _compute_one(ctx, idno, timings=timings_chunk)
                 if row:
                     row["RUN_ID"] = run_id
                     batch_rows.append(row)
@@ -275,8 +284,10 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
                     err += 1
             except Exception as e:
                 err += 1
-                if err <= 5:
-                    print(f"  ERR IDNO={idno}: {e}")
+                etype = type(e).__name__
+                err_summary[etype] = err_summary.get(etype, 0) + 1
+                if err_summary[etype] <= 3:
+                    print(f"  ERR [{etype}] IDNO={idno}: {e}")
 
         # 청크 완료 → DB flush
         t_flush = time.time()
@@ -314,6 +325,8 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
     cache_total = timings_all.get("cache_load", 0)
     flush_total = timings_all.get("db_flush", 0)
     print(f"  [단일프로세스]  cache_load: {cache_total:.2f}s  db_flush: {flush_total:.2f}s")
+    if err_summary:
+        print(f"  [단일프로세스] 에러 요약: {err_summary}")
 
     return ok, err
 
@@ -343,6 +356,7 @@ def _worker_process(task):
     rows = []
     ok = err = 0
     err_msgs = []
+    err_summary = {}
     timings = {}
     mn_cache = {}
 
@@ -357,12 +371,17 @@ def _worker_process(task):
         bn_cache = BNDataCache(con, pcv_filter=unique_pcv)
         timings["cache_load"] = timings.get("cache_load", 0) + (time.time() - t_cache)
 
+        # 청크별 PipelineContext 구성
+        ctx = PipelineContext(
+            con=con, loader=loader, trad_cache=trad_cache,
+            bn_cache=bn_cache, exp_cache=exp_cache, dc_curve=dc_curve,
+            polno_map=polno_map, mn_cache=mn_cache,
+        )
+
         mn_cache.clear()
         for idno in chunk_ids:
             try:
-                row = _compute_one(
-                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                    timings=timings, polno_map=polno_map, mn_cache=mn_cache)
+                row = _compute_one(ctx, idno, timings=timings)
                 if row:
                     rows.append(row)
                     ok += 1
@@ -370,8 +389,10 @@ def _worker_process(task):
                     err += 1
             except Exception as e:
                 err += 1
-                if len(err_msgs) < 3:
-                    err_msgs.append(f"IDNO={idno}: {e}")
+                etype = type(e).__name__
+                err_summary[etype] = err_summary.get(etype, 0) + 1
+                if err_summary[etype] <= 3:
+                    err_msgs.append(f"[{etype}] IDNO={idno}: {e}")
 
     con.close()
     return (worker_id, rows, ok, err, err_msgs, timings)

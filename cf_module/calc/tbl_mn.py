@@ -6,7 +6,7 @@
   - OD_RSK_RT의 INVLD_TRMNAT_AF_APLY_RSK_RT (최종 월율)
   - OD_LAPSE_RT의 APLY_TRMNAT_RT (월 해지율)
   - exit_flags (IP_R_COV_RSKRT_C / IP_R_BNFT_RSKRT_C)
-출력: dict of arrays (n_steps) — OD_TBL_MN 18개 컬럼
+출력: MNResult — OD_TBL_MN 18개 컬럼
 
 핵심 로직:
   1. OD_RSK_RT → 월율 (이미 면책/BEPRD/월변환 적용됨)
@@ -20,6 +20,61 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from cf_module.data.rsk_lapse_loader import ContractInfo, RiskInfo
+
+
+# ---------------------------------------------------------------------------
+# MNResult: dict 대신 명시적 타입으로 중간 결과 전달
+# ---------------------------------------------------------------------------
+
+class MNResult(dict):
+    """TBL_MN 산출 결과.
+
+    dict를 상속하여 기존 ``tbl_mn.get("CTR_TRMO_MTNPSN_CNT")`` 호출을
+    깨뜨리지 않으면서, 속성 접근도 지원한다.
+
+    Usage::
+        mn = compute_tbl_mn(...)
+        # dict 스타일 (하위호환)
+        mn.get("CTR_TRMO_MTNPSN_CNT")
+        mn["CTR_TRME_MTNPSN_CNT"]
+        # 속성 스타일 (IDE 자동완성)
+        mn.ctr_trmo
+        mn.ctr_trme
+    """
+
+    # --- CTR (유지자 기준) 속성 ---
+    @property
+    def ctr_trmo(self) -> np.ndarray:
+        return self["CTR_TRMO_MTNPSN_CNT"]
+
+    @property
+    def ctr_trme(self) -> np.ndarray:
+        return self["CTR_TRME_MTNPSN_CNT"]
+
+    @property
+    def ctr_trmnat_rt(self) -> np.ndarray:
+        return self["CTR_TRMNAT_RT"]
+
+    @property
+    def ctr_rsvamt_rt(self) -> np.ndarray:
+        return self["CTR_RSVAMT_DEFRY_DRPO_RSKRT"]
+
+    @property
+    def ctr_trmpsn(self) -> np.ndarray:
+        return self["CTR_TRMPSN_CNT"]
+
+    @property
+    def ctr_rsvamt_drpsn(self) -> np.ndarray:
+        return self["CTR_RSVAMT_DEFRY_DRPSN_CNT"]
+
+    # --- PAY (납입자 기준) 속성 ---
+    @property
+    def pay_trmo(self) -> np.ndarray:
+        return self["PAY_TRMO_MTNPSN_CNT"]
+
+    @property
+    def pay_trme(self) -> np.ndarray:
+        return self["PAY_TRME_MTNPSN_CNT"]
 
 
 def build_c_matrix(
@@ -169,6 +224,7 @@ def compute_tbl_mn(
             result["PAY_TRME_MTNPSN_CNT"] = z.copy()
         else:
             result["PAY_TRMO_MTNPSN_CNT"] = np.ones(n_steps, dtype=np.float64)
+        result = MNResult(result)
         if return_dedup:
             dedup_detail = {
                 "risk_cds": [r.risk_cd for r in risks],
@@ -280,7 +336,7 @@ def compute_tbl_mn(
     pay_bnft_drpsn[0] = 0.0
     pyexsp_drpsn[0] = 0.0
 
-    result = {
+    result = MNResult({
         # CTR (유지자 기준)
         "CTR_TRMO_MTNPSN_CNT": tpx_bot,
         "CTR_TRMNAT_RT": wx_dedup_ctr,
@@ -301,7 +357,7 @@ def compute_tbl_mn(
         "PAY_BNFT_DEFRY_DRPSN_CNT": pay_bnft_drpsn,
         "PYEXSP_DRPSN_CNT": pyexsp_drpsn,
         "PAY_TRME_MTNPSN_CNT": pay_tpx,
-    }
+    })
 
     if return_dedup:
         dedup_detail = {
