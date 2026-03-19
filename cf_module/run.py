@@ -3,9 +3,10 @@
 RSK_RT → LAPSE_RT → TBL_MN → TRAD_PV → TBL_BN → EXP → CF → DC_RT → PVCF → BEL
 
 Usage:
-    python -m cf_module.run --idno 760397
-    python -m cf_module.run --idno 760397 --table MN
-    python -m cf_module.run --idno 760397 --debug
+    python -m cf_module.run --idno 760397               # BEL만 출력 (기본)
+    python -m cf_module.run --idno 760397 --table MN     # 특정 단계까지
+    python -m cf_module.run --idno 760397 --debug        # 전체 중간테이블 CSV 출력
+    python -m cf_module.run --idno 760397 --debug --save RSK_RT,CF,BEL  # 선택 출력
 """
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -489,7 +490,10 @@ def main():
     parser.add_argument("--table", type=str, default=None,
                         help=f"특정 테이블까지만 산출 ({', '.join(ALL_TABLES)})")
     parser.add_argument("--no-pv", action="store_true", help="TRAD_PV 이후 제외")
-    parser.add_argument("--debug", action="store_true", help="상세 결과 출력")
+    parser.add_argument("--debug", action="store_true",
+                        help="중간 테이블 CSV 출력 + 요약 (미지정 시 BEL만 출력)")
+    parser.add_argument("--save", type=str, default=None,
+                        help="--debug 시 저장할 테이블 (콤마구분, 예: RSK_RT,CF,BEL)")
     parser.add_argument("--output", "-o", type=str, default="output",
                         help="CSV 출력 디렉토리 (기본: output)")
     parser.add_argument("--db", type=str, default="duckdb_transform.duckdb",
@@ -520,11 +524,33 @@ def main():
     result = run_single(con, args.idno, include_trad_pv=include_pv, include_bn=include_bn)
 
     if args.debug:
+        # --debug: 요약 출력 + CSV 저장
         _print_summary(result, tables)
-
-    saved = _save_csv(result, tables, args.output)
-    for tbl_name, path, n_rows in saved:
-        print(f"  [{tbl_name}] {n_rows}행 → {path}")
+        if args.save:
+            save_tables = [t.strip().upper() for t in args.save.split(",")]
+            # 유효성 검증
+            for t in save_tables:
+                if t not in ALL_TABLES:
+                    print(f"  WARNING: '{t}'는 유효한 테이블이 아닙니다 ({ALL_TABLES})")
+            save_tables = [t for t in save_tables if t in tables]
+        else:
+            save_tables = tables  # --debug만 쓰면 전체 저장
+        saved = _save_csv(result, save_tables, args.output)
+        for tbl_name, path, n_rows in saved:
+            print(f"  [{tbl_name}] {n_rows}행 → {path}")
+    else:
+        # 기본 모드: BEL만 출력
+        if result.bel:
+            print(f"\n  [BEL] = {result.bel.bel:,.2f}")
+            saved = _save_csv(result, ["BEL"], args.output)
+            for tbl_name, path, n_rows in saved:
+                print(f"  [{tbl_name}] → {path}")
+        else:
+            # --table로 BEL 이전 단계까지만 실행한 경우
+            last_table = tables[-1]
+            saved = _save_csv(result, [last_table], args.output)
+            for tbl_name, path, n_rows in saved:
+                print(f"  [{tbl_name}] {n_rows}행 → {path}")
 
     elapsed = time.time() - t0
     print(f"\n  총 소요: {elapsed:.2f}s")
