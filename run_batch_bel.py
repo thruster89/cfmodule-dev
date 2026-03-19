@@ -99,10 +99,12 @@ def _reset_run(out_con, run_id=None):
 # ---------------------------------------------------------------------------
 
 def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                  timings=None):
+                  timings=None, polno_map=None, mn_cache=None):
     """BEL 1건 산출. 성공 시 dict, 실패 시 None.
 
     timings: dict가 전달되면 단계별 누적 시간(초) 기록.
+    polno_map: POLNO 그룹 사전 매핑 (SQL 조회 생략용).
+    mn_cache: MN 결과 캐시 (그룹 내 중복 계산 방지용).
     """
     t0 = time.time()
 
@@ -110,10 +112,17 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
     n_steps = compute_n_steps(ctr)
     t1 = time.time()
 
-    rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(loader, ctr, n_steps)
+    # mn_cache에 이미 있으면 재사용
+    if mn_cache is not None and idno in mn_cache:
+        rsk_rt, lapse_rt, tbl_mn = mn_cache[idno]
+    else:
+        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(loader, ctr, n_steps)
+        if mn_cache is not None:
+            mn_cache[idno] = (rsk_rt, lapse_rt, tbl_mn)
     t2 = time.time()
 
-    trad_pv = _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps)
+    trad_pv = _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps,
+                                       polno_map=polno_map, mn_cache=mn_cache)
     if not trad_pv:
         return None
     pv_d = trad_pv.to_dict()
@@ -175,6 +184,36 @@ def _print_timings(timings, label=""):
 
 
 # ---------------------------------------------------------------------------
+# POLNO 그룹 사전 매핑
+# ---------------------------------------------------------------------------
+
+def _build_polno_map(con):
+    """CTR_POLNO→IDNO 그룹 사전 매핑 구축.
+
+    Returns:
+        {idno: (polno, [(idno, cov_cd), ...])} — 각 IDNO에서 자신의 그룹 조회 가능.
+    """
+    rows = con.execute("""
+        SELECT INFRC_IDNO, CTR_POLNO, COV_CD
+        FROM II_INFRC WHERE INFRC_SEQ = 1
+        ORDER BY CTR_POLNO, INFRC_IDNO
+    """).fetchall()
+
+    # polno → [(idno, cov_cd), ...]
+    polno_groups = {}
+    for idno, polno, cov in rows:
+        polno_groups.setdefault(polno, []).append((idno, cov))
+
+    # idno → (polno, group_list)
+    polno_map = {}
+    for polno, grp in polno_groups.items():
+        for idno, _ in grp:
+            polno_map[idno] = (polno, grp)
+
+    return polno_map
+
+
+# ---------------------------------------------------------------------------
 # 청크 유틸: flat 리스트에서 unique (prod, cov) 추출
 # ---------------------------------------------------------------------------
 
@@ -193,7 +232,7 @@ def _chunk_idnos(chunk):
 # ---------------------------------------------------------------------------
 
 def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
-                        preload, chunk_size, run_id, out_con):
+                        preload, chunk_size, run_id, out_con, polno_map=None):
     """단일 프로세스 실행. flat_list = [(idno, prod, cov), ...]"""
     trad_cache_all = None
     bn_cache_all = None
@@ -206,6 +245,7 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
     ok = err = 0
     t_start = time.time()
     timings_all = {}
+    mn_cache = {}  # {idno: (rsk_rt, lapse_rt, tbl_mn)} — 그룹 내 중복계산 방지
 
     for ci in range(0, total_target, chunk_size):
         chunk = flat_list[ci:ci + chunk_size]
@@ -226,7 +266,7 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
             try:
                 row = _compute_one(
                     con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                    timings=timings_chunk)
+                    timings=timings_chunk, polno_map=polno_map, mn_cache=mn_cache)
                 if row:
                     row["RUN_ID"] = run_id
                     batch_rows.append(row)
@@ -246,6 +286,9 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
                 "INSERT INTO OP_BEL BY NAME SELECT * FROM df")
             batch_rows = []
         flush_sec = time.time() - t_flush
+
+        # 청크 완료 → mn_cache 정리 (메모리 관리)
+        mn_cache.clear()
 
         # 청크 타이밍 누적
         for k, v in timings_chunk.items():
@@ -295,11 +338,13 @@ def _worker_process(task):
     all_ids = _chunk_idnos(worker_items)
     loader.preload_contracts(idnos=all_ids)
     exp_cache = ExpDataCache(con)
+    polno_map = _build_polno_map(con)
 
     rows = []
     ok = err = 0
     err_msgs = []
     timings = {}
+    mn_cache = {}
 
     # 워커 내에서도 청크 단위로 캐시 로드
     for ci in range(0, len(worker_items), chunk_size):
@@ -312,11 +357,12 @@ def _worker_process(task):
         bn_cache = BNDataCache(con, pcv_filter=unique_pcv)
         timings["cache_load"] = timings.get("cache_load", 0) + (time.time() - t_cache)
 
+        mn_cache.clear()
         for idno in chunk_ids:
             try:
                 row = _compute_one(
                     con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
-                    timings=timings)
+                    timings=timings, polno_map=polno_map, mn_cache=mn_cache)
                 if row:
                     rows.append(row)
                     ok += 1
@@ -485,11 +531,12 @@ def main():
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
 
-        print(f"공통 캐시 로드: {time.time() - t0:.1f}s")
+        polno_map = _build_polno_map(con)
+        print(f"공통 캐시 로드: {time.time() - t0:.1f}s (polno_map: {len(polno_map):,}건)")
 
         ok, err = _run_single_process(
             con, flat_list, loader, exp_cache, dc_curve,
-            args.preload, args.chunk, run_id, out_con)
+            args.preload, args.chunk, run_id, out_con, polno_map=polno_map)
     else:
         # 멀티프로세스 모드
         dc_curve_rows = con.execute(

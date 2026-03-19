@@ -241,20 +241,20 @@ def _calc_premium(info: ContractInfo, n_steps: int) -> dict:
         else:
             acum_nprem = np.full(n_steps, nprem_val, dtype=np.float64) * prem_pay_yn
 
-    # 기납입보험료 (누적)
-    pad_prem = np.empty(n_steps, dtype=np.float64)
+    # 기납입보험료 (누적) — 벡터화
     cyc = info.paycyc if info.paycyc > 0 else 1
     if info.paycyc == 0:
-        # 일시납: 1회 납입
-        pad_prem[0] = info.gprem
+        initial_paid = info.gprem
     else:
-        # 납입횟수 = (min(CTR_MM, PTERM_MM) - 1) // paycyc + 1
         cm0 = int(ctr_mm[0])
         paid_mm = min(cm0, pterm_mm) if info.pay_stcd == 1 else cm0
         pay_count = (paid_mm - 1) // cyc + 1 if paid_mm > 0 else 0
-        pad_prem[0] = info.gprem * pay_count
-    for t in range(1, n_steps):
-        pad_prem[t] = pad_prem[t - 1] + info.gprem * prem_pay_yn[t]
+        initial_paid = info.gprem * pay_count
+    # pad_prem[0] = initial_paid, pad_prem[t] = initial_paid + Σ(gprem × pay_yn[1:t])
+    pad_prem = np.empty(n_steps, dtype=np.float64)
+    pad_prem[0] = initial_paid
+    if n_steps > 1:
+        pad_prem[1:] = initial_paid + np.cumsum(info.gprem * prem_pay_yn[1:])
 
     acqsexp1 = np.full(n_steps, info.acqsexp1, dtype=np.float64)
 
@@ -761,64 +761,82 @@ def _compute_acum_interest_based(
     adint_aply_arr = np.zeros(n_steps, dtype=np.float64)
     adint_lwst_arr = np.zeros(n_steps, dtype=np.float64)
 
+    if n_steps == 0:
+        return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
+
+    # t=0 초기값
+    adint_aply_arr[0] = V
+    adint_lwst_arr[0] = V
+    aply_acum[0] = V
+    lwst_acum[0] = V
+
+    if n_steps == 1:
+        return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
+
+    # V < 0: 부리 없음 (t>=1 모두 상수)
+    if V < 0:
+        aply_acum[1:] = V
+        lwst_acum[1:] = V
+        return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
+
+    # --- 사전 계산: P*ratio 배열, 연도경계 마스크, 이율 (벡터화) ---
+    ctr_mm_arr = np.arange(n_steps, dtype=np.int64) + elapsed_mm
+    is_year_bd = (ctr_mm_arr % 12 == 1)  # 연도 경계 마스크
+
+    # P 배열: nprem × is_pay_month (상각 고려)
     has_ratio = (pay_trmo is not None and ctr_trmo is not None)
-    cum_int_aply = 0.0
-    cum_int_lwst = 0.0
+    if prem_pay_yn is not None:
+        is_pay = (prem_pay_yn[:n_steps] > 0)
+    else:
+        is_pay = np.ones(n_steps, dtype=bool) if pay_stcd == 1 else np.zeros(n_steps, dtype=bool)
+        if pay_stcd == 1:
+            is_pay[ctr_mm_arr > pterm_mm] = False
 
-    for t in range(n_steps):
-        ctr_mm = elapsed_mm + t
+    if nprem_old is not None and amort_mm > 0:
+        cur_nprem_arr = np.where(ctr_mm_arr <= amort_mm, nprem_old, nprem)
+    else:
+        cur_nprem_arr = nprem  # 스칼라 → broadcast
 
-        # 실제 납입월인지 판정 (prem_pay_yn 배열 우선, 없으면 월납 가정)
-        if prem_pay_yn is not None and t < len(prem_pay_yn):
-            is_pay_month = prem_pay_yn[t] > 0
+    P_arr = np.where(is_pay, cur_nprem_arr, 0.0)
+
+    # ratio 배열
+    if has_ratio:
+        safe_ctr = np.where(ctr_trmo[:n_steps] > 0, ctr_trmo[:n_steps], 1.0)
+        ratio_arr = np.where(ctr_trmo[:n_steps] > 0,
+                             pay_trmo[:n_steps] / safe_ctr,
+                             np.where(is_pay, 1.0, 0.0))
+    else:
+        ratio_arr = np.where(is_pay, 1.0, 0.0)
+
+    PR = P_arr * ratio_arr  # 사전 계산된 P*ratio
+
+    inrt_aply = pubano_inrt_arr[:n_steps] / 12.0
+    inrt_lwst = lwst_inrt_arr[:n_steps] / 12.0
+
+    # --- 순차 루프 (사전 계산 값 참조, 최소 오버헤드) ---
+    cum_int_a = 0.0
+    cum_int_l = 0.0
+
+    for t in range(1, n_steps):
+        pr = PR[t]
+        if is_year_bd[t]:
+            base_a = aply_acum[t - 1]
+            base_l = lwst_acum[t - 1]
+            cum_int_a = 0.0
+            cum_int_l = 0.0
         else:
-            is_pay_month = (pay_stcd == 1) and (ctr_mm <= pterm_mm)
-        # CTR_MM <= amort_mm이면 old prem, 이후 new prem
-        cur_nprem = nprem_old if (nprem_old is not None and amort_mm > 0 and ctr_mm <= amort_mm) else nprem
-        P = cur_nprem if is_pay_month else 0.0
+            base_a = adint_aply_arr[t - 1]
+            base_l = adint_lwst_arr[t - 1]
 
-        # 납입자/유지자 비율
-        if has_ratio and t < len(ctr_trmo) and ctr_trmo[t] > 0:
-            ratio = pay_trmo[t] / ctr_trmo[t]
-        else:
-            ratio = 1.0 if is_pay_month else 0.0
+        ad_a = base_a + pr
+        ad_l = base_l + pr
+        adint_aply_arr[t] = ad_a
+        adint_lwst_arr[t] = ad_l
 
-        inrt_aply = pubano_inrt_arr[t] if t < len(pubano_inrt_arr) else 0.0
-        inrt_lwst = lwst_inrt_arr[t] if t < len(lwst_inrt_arr) else 0.0
-
-        if t == 0:
-            adint_aply_arr[t] = V
-            adint_lwst_arr[t] = V
-            aply_acum[t] = V
-            lwst_acum[t] = V
-        elif V < 0:
-            # 음수 적립금: 부리 없음, t>=1 ADINT=0, ACUM=V 고정
-            adint_aply_arr[t] = 0.0
-            adint_lwst_arr[t] = 0.0
-            aply_acum[t] = V
-            lwst_acum[t] = V
-        else:
-            # 연도 경계: CTR_MM % 12 == 1
-            is_year_boundary = (ctr_mm % 12 == 1)
-            if is_year_boundary:
-                base_aply = aply_acum[t - 1]
-                base_lwst = lwst_acum[t - 1]
-                cum_int_aply = 0.0
-                cum_int_lwst = 0.0
-            else:
-                base_aply = adint_aply_arr[t - 1]
-                base_lwst = adint_lwst_arr[t - 1]
-
-            adint_aply = base_aply + P * ratio
-            adint_lwst = base_lwst + P * ratio
-
-            adint_aply_arr[t] = adint_aply
-            adint_lwst_arr[t] = adint_lwst
-
-            cum_int_aply += adint_aply * inrt_aply / 12
-            cum_int_lwst += adint_lwst * inrt_lwst / 12
-            aply_acum[t] = adint_aply + cum_int_aply
-            lwst_acum[t] = adint_lwst + cum_int_lwst
+        cum_int_a += ad_a * inrt_aply[t]
+        cum_int_l += ad_l * inrt_lwst[t]
+        aply_acum[t] = ad_a + cum_int_a
+        lwst_acum[t] = ad_l + cum_int_l
 
     return aply_acum, lwst_acum, adint_aply_arr, adint_lwst_arr
 
