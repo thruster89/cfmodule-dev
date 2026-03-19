@@ -95,8 +95,16 @@ def _compute_mn_chain(loader, ctr, n_steps):
 # STEP 4: TRAD_PV
 # ---------------------------------------------------------------------------
 
-def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps):
-    """TRAD_PV (CTR_POLNO netting 포함)."""
+def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps,
+                             polno_map=None, mn_cache=None):
+    """TRAD_PV (CTR_POLNO netting 포함).
+
+    Args:
+        polno_map: {idno: (polno, [(idno, cov_cd), ...])} 사전 매핑.
+                   제공 시 SQL 조회 생략.
+        mn_cache:  {idno: (rsk_rt, lapse_rt, tbl_mn)} MN 결과 캐시.
+                   제공 시 그룹 내 타 IDNO의 MN 중복계산 생략.
+    """
     info = build_contract_info_cached(trad_cache, idno)
     if not info:
         return None
@@ -105,20 +113,26 @@ def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps):
     ctr_trmo = tbl_mn.get("CTR_TRMO_MTNPSN_CNT")
     ctr_trme = tbl_mn.get("CTR_TRME_MTNPSN_CNT")
 
-    polno_row = con.execute(
-        "SELECT CTR_POLNO FROM II_INFRC WHERE INFRC_IDNO = ? AND INFRC_SEQ = 1",
-        [idno]).fetchone()
-    polno = polno_row[0] if polno_row else None
+    # POLNO 그룹 조회 (사전 매핑 우선)
+    if polno_map is not None and idno in polno_map:
+        polno, grp_list = polno_map[idno]
+        group_idnos = [gid for gid, _ in grp_list]
+        idno_to_cov = {gid: cov for gid, cov in grp_list}
+    else:
+        polno_row = con.execute(
+            "SELECT CTR_POLNO FROM II_INFRC WHERE INFRC_IDNO = ? AND INFRC_SEQ = 1",
+            [idno]).fetchone()
+        polno = polno_row[0] if polno_row else None
 
-    group_idnos = [idno]
-    idno_to_cov = {}
-    if polno:
-        grp = con.execute(
-            "SELECT INFRC_IDNO, COV_CD FROM II_INFRC "
-            "WHERE CTR_POLNO = ? AND INFRC_SEQ = 1 ORDER BY INFRC_IDNO",
-            [polno]).fetchall()
-        group_idnos = [r[0] for r in grp]
-        idno_to_cov = {r[0]: r[1] for r in grp}
+        group_idnos = [idno]
+        idno_to_cov = {}
+        if polno:
+            grp = con.execute(
+                "SELECT INFRC_IDNO, COV_CD FROM II_INFRC "
+                "WHERE CTR_POLNO = ? AND INFRC_SEQ = 1 ORDER BY INFRC_IDNO",
+                [polno]).fetchall()
+            group_idnos = [r[0] for r in grp]
+            idno_to_cov = {r[0]: r[1] for r in grp}
 
     results = {}
     ctr_trme_map = {}
@@ -129,9 +143,18 @@ def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps):
         if gid == idno:
             g_pay_trmo, g_ctr_trmo, g_ctr_trme, g_n = pay_trmo, ctr_trmo, ctr_trme, n_steps
         else:
-            g_ctr_obj = loader.load_contract(gid)
-            g_n = compute_n_steps(g_ctr_obj)
-            _, _, g_mn = _compute_mn_chain(loader, g_ctr_obj, g_n)
+            # mn_cache에서 먼저 조회
+            if mn_cache is not None and gid in mn_cache:
+                _, _, g_mn = mn_cache[gid]
+                g_ctr_obj = loader.load_contract(gid)
+                g_n = compute_n_steps(g_ctr_obj)
+            else:
+                g_ctr_obj = loader.load_contract(gid)
+                g_n = compute_n_steps(g_ctr_obj)
+                _, _, g_mn = _compute_mn_chain(loader, g_ctr_obj, g_n)
+                # 캐시에 저장
+                if mn_cache is not None:
+                    mn_cache[gid] = (None, None, g_mn)
             g_pay_trmo = g_mn.get("PAY_TRMO_MTNPSN_CNT")
             g_ctr_trmo = g_mn.get("CTR_TRMO_MTNPSN_CNT")
             g_ctr_trme = g_mn.get("CTR_TRME_MTNPSN_CNT")
