@@ -98,17 +98,26 @@ def _reset_run(out_con, run_id=None):
 # 단건 산출 (배치용, 캐시 주입)
 # ---------------------------------------------------------------------------
 
-def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno):
-    """BEL 1건 산출. 성공 시 dict, 실패 시 None."""
+def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
+                  timings=None):
+    """BEL 1건 산출. 성공 시 dict, 실패 시 None.
+
+    timings: dict가 전달되면 단계별 누적 시간(초) 기록.
+    """
+    t0 = time.time()
+
     ctr = loader.load_contract(idno)
     n_steps = compute_n_steps(ctr)
+    t1 = time.time()
 
     rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(loader, ctr, n_steps)
+    t2 = time.time()
 
     trad_pv = _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps)
     if not trad_pv:
         return None
     pv_d = trad_pv.to_dict()
+    t3 = time.time()
 
     acum_bnft = pv_d.get("APLY_PREM_ACUMAMT_BNFT")
     tbl_bn = _compute_bn_single(con, bn_cache, ctr, rsk_rt, lapse_rt, n_steps, acum_bnft)
@@ -117,12 +126,14 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno):
     if tbl_bn:
         for br in tbl_bn.bnft_results.values():
             bn_insuamt += br.bnft_insuamt
+    t4 = time.time()
 
     infrc_raw = trad_cache.infrc.get(idno, {})
     gprem = infrc_raw.get("gprem") or infrc_raw.get("effective_gprem", 0)
     val5 = ctr.assm_divs[4] if len(ctr.assm_divs) > 4 else None
     exp_results, exp_items = _compute_exp_single(
         exp_cache, ctr, n_steps, pv_d, gprem=gprem, val5=val5)
+    t5 = time.time()
 
     lsvy_rate = 0.0
     for tp, kd, it in (exp_items or []):
@@ -134,10 +145,33 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno):
     dc = compute_dc_rt(n_steps, dc_curve)
     pvcf = compute_pvcf(cf, dc)
     bel = compute_bel(pvcf)
+    t6 = time.time()
+
+    if timings is not None:
+        timings["load_ctr"] = timings.get("load_ctr", 0) + (t1 - t0)
+        timings["mn_chain"] = timings.get("mn_chain", 0) + (t2 - t1)
+        timings["trad_pv"] = timings.get("trad_pv", 0) + (t3 - t2)
+        timings["tbl_bn"] = timings.get("tbl_bn", 0) + (t4 - t3)
+        timings["exp"] = timings.get("exp", 0) + (t5 - t4)
+        timings["cf_bel"] = timings.get("cf_bel", 0) + (t6 - t5)
+        timings["_count"] = timings.get("_count", 0) + 1
 
     row = {"INFRC_IDNO": idno}
     row.update(bel.to_dict())
     return row
+
+
+def _print_timings(timings, label=""):
+    """단계별 누적 타이밍 출력."""
+    n = timings.get("_count", 1)
+    total = sum(v for k, v in timings.items() if k != "_count")
+    prefix = f"  [{label}] " if label else "  "
+    print(f"{prefix}단계별 소요시간 ({n:,}건, 합계 {total:.2f}s):")
+    for key in ["load_ctr", "mn_chain", "trad_pv", "tbl_bn", "exp", "cf_bel"]:
+        v = timings.get(key, 0)
+        pct = v / total * 100 if total > 0 else 0
+        avg_ms = v / n * 1000 if n > 0 else 0
+        print(f"{prefix}  {key:>10s}: {v:7.2f}s ({pct:5.1f}%) avg {avg_ms:.2f}ms")
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +205,13 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
     batch_rows = []
     ok = err = 0
     t_start = time.time()
+    timings_all = {}
 
     for ci in range(0, total_target, chunk_size):
         chunk = flat_list[ci:ci + chunk_size]
         chunk_ids = _chunk_idnos(chunk)
 
+        t_cache = time.time()
         if preload:
             trad_cache = trad_cache_all
             bn_cache = bn_cache_all
@@ -183,11 +219,14 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
             unique_pcv = _extract_unique_pcv(chunk)
             trad_cache = TradPVDataCache(con, idno_filter=set(chunk_ids))
             bn_cache = BNDataCache(con, pcv_filter=unique_pcv)
+        cache_sec = time.time() - t_cache
 
+        timings_chunk = {}
         for idno in chunk_ids:
             try:
                 row = _compute_one(
-                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno)
+                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
+                    timings=timings_chunk)
                 if row:
                     row["RUN_ID"] = run_id
                     batch_rows.append(row)
@@ -200,10 +239,18 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
                     print(f"  ERR IDNO={idno}: {e}")
 
         # 청크 완료 → DB flush
+        t_flush = time.time()
         if batch_rows:
             df = pd.DataFrame(batch_rows)
             out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
             batch_rows = []
+        flush_sec = time.time() - t_flush
+
+        # 청크 타이밍 누적
+        for k, v in timings_chunk.items():
+            timings_all[k] = timings_all.get(k, 0) + v
+        timings_all["cache_load"] = timings_all.get("cache_load", 0) + cache_sec
+        timings_all["db_flush"] = timings_all.get("db_flush", 0) + flush_sec
 
         processed = ci + len(chunk)
         elapsed = time.time() - t_start
@@ -211,11 +258,18 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
         eta = (total_target - processed) / rate if rate > 0 else 0
         print(f"  [{processed:,}/{total_target:,}] "
               f"OK={ok:,} ERR={err} "
+              f"cache={cache_sec:.1f}s flush={flush_sec:.2f}s "
               f"{rate:.0f}건/s ETA={eta:.0f}s")
 
     if batch_rows:
         df = pd.DataFrame(batch_rows)
         out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+
+    # 전체 타이밍 요약
+    _print_timings(timings_all, "단일프로세스")
+    cache_total = timings_all.get("cache_load", 0)
+    flush_total = timings_all.get("db_flush", 0)
+    print(f"  [단일프로세스]  cache_load: {cache_total:.2f}s  db_flush: {flush_total:.2f}s")
 
     return ok, err
 
@@ -244,6 +298,7 @@ def _worker_process(task):
     rows = []
     ok = err = 0
     err_msgs = []
+    timings = {}
 
     # 워커 내에서도 청크 단위로 캐시 로드
     for ci in range(0, len(worker_items), chunk_size):
@@ -251,13 +306,16 @@ def _worker_process(task):
         chunk_ids = _chunk_idnos(chunk)
         unique_pcv = _extract_unique_pcv(chunk)
 
+        t_cache = time.time()
         trad_cache = TradPVDataCache(con, idno_filter=set(chunk_ids))
         bn_cache = BNDataCache(con, pcv_filter=unique_pcv)
+        timings["cache_load"] = timings.get("cache_load", 0) + (time.time() - t_cache)
 
         for idno in chunk_ids:
             try:
                 row = _compute_one(
-                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno)
+                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
+                    timings=timings)
                 if row:
                     rows.append(row)
                     ok += 1
@@ -269,7 +327,7 @@ def _worker_process(task):
                     err_msgs.append(f"IDNO={idno}: {e}")
 
     con.close()
-    return (worker_id, rows, ok, err, err_msgs)
+    return (worker_id, rows, ok, err, err_msgs, timings)
 
 
 def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
@@ -301,7 +359,8 @@ def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
 
     # 결과 집계 + DB 쓰기
     ok = err = 0
-    for worker_id, w_rows, w_ok, w_err, w_msgs in results:
+    timings_all = {}
+    for worker_id, w_rows, w_ok, w_err, w_msgs, w_timings in results:
         ok += w_ok
         err += w_err
         for msg in w_msgs:
@@ -313,9 +372,19 @@ def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
             df = pd.DataFrame(w_rows)
             out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
 
+        # 워커별 타이밍 출력
+        if w_timings:
+            _print_timings(w_timings, f"워커{worker_id}")
+            cache_t = w_timings.get("cache_load", 0)
+            print(f"  [워커{worker_id}]  cache_load: {cache_t:.2f}s")
+            for k, v in w_timings.items():
+                timings_all[k] = timings_all.get(k, 0) + v
+
     elapsed = time.time() - t_start
     rate = ok / elapsed if elapsed > 0 else 0
-    print(f"  병렬 산출 완료: {ok:,}건 {elapsed:.1f}s ({rate:.0f}건/s)")
+    print(f"\n  병렬 산출 완료: {ok:,}건 {elapsed:.1f}s ({rate:.0f}건/s)")
+    if timings_all:
+        _print_timings(timings_all, "전체합산")
 
     return ok, err
 
