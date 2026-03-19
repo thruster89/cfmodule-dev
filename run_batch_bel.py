@@ -1,18 +1,22 @@
 """OP_BEL 배치 산출 → DuckDB 저장.
 
 청크 기반 배치: PROD_CD/COV_CD 단위 캐시 + IDNO 청크 분할 처리.
-실행번호(RUN_ID) 관리 + 삭제 후 재실행(--reset) 지원.
+멀티프로세스 병렬 처리 + 실행번호(RUN_ID) 관리.
 
 Usage:
     python run_batch_bel.py                          # 전건 산출 → output_bel.duckdb
     python run_batch_bel.py --n 1000                 # 1000건만
     python run_batch_bel.py -o result.duckdb         # 출력 DB 지정
     python run_batch_bel.py --reset                  # 기존 결과 삭제 후 재실행
-    python run_batch_bel.py --run-id 3               # 특정 실행번호 지정
-    python run_batch_bel.py --chunk 3000             # 청크 크기 조정 (기본 5000)
+    python run_batch_bel.py --reset-run 3            # 특정 RUN_ID만 삭제 후 재실행
     python run_batch_bel.py --preload                # 전건 캐시 프리로드 (메모리 충분 시)
+    python run_batch_bel.py --chunk 3000             # 청크 크기 조정 (기본 5000)
+    python run_batch_bel.py --workers 4              # 4 프로세스 병렬 (기본: CPU수-1)
+    python run_batch_bel.py --workers 1              # 단일 프로세스 (디버그용)
 """
 import argparse
+import multiprocessing as mp
+import os
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -62,6 +66,7 @@ _RUN_LOG_COLUMNS = """
     TOTAL_OK INTEGER,
     TOTAL_ERR INTEGER,
     ELAPSED_SEC DOUBLE,
+    WORKERS INTEGER,
     STATUS VARCHAR
 """
 
@@ -137,17 +142,230 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno):
 
 
 # ---------------------------------------------------------------------------
+# 워커: 상품 그룹 단위 처리
+# ---------------------------------------------------------------------------
+
+def _worker_process(task):
+    """멀티프로세스 워커. 상품 그룹 리스트를 받아 처리 후 결과 반환.
+
+    Args:
+        task: (db_path, worker_id, group_assignments, dc_curve, preload)
+              group_assignments = [((prod, cov), [idno, ...]), ...]
+    Returns:
+        (worker_id, rows, ok_count, err_count, err_msgs)
+    """
+    db_path, worker_id, group_assignments, dc_curve, preload = task
+
+    con = duckdb.connect(db_path, read_only=True)
+    loader = RawAssumptionLoader(con)
+    # 워커별 계약 프리로드: 자기 그룹의 IDNO만
+    all_worker_ids = []
+    for (prod, cov), ids in group_assignments:
+        all_worker_ids.extend(ids)
+    loader.preload_contracts(idnos=all_worker_ids)
+    exp_cache = ExpDataCache(con)
+
+    if preload:
+        trad_cache_all = TradPVDataCache(con)
+        bn_cache_all = BNDataCache(con)
+    else:
+        trad_cache_all = None
+        bn_cache_all = None
+
+    rows = []
+    ok = err = 0
+    err_msgs = []
+
+    for (prod, cov), group_ids in group_assignments:
+        if not group_ids:
+            continue
+
+        if preload:
+            trad_cache = trad_cache_all
+            bn_cache = bn_cache_all
+        else:
+            trad_cache = TradPVDataCache(con, idno_filter=set(group_ids))
+            bn_cache = BNDataCache(con, pcv_filter=[(prod, cov)])
+
+        for idno in group_ids:
+            try:
+                row = _compute_one(
+                    con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno)
+                if row:
+                    rows.append(row)
+                    ok += 1
+                else:
+                    err += 1
+            except Exception as e:
+                err += 1
+                if len(err_msgs) < 3:
+                    err_msgs.append(f"IDNO={idno}: {e}")
+
+    con.close()
+    return (worker_id, rows, ok, err, err_msgs)
+
+
+def _distribute_groups(pcv_groups, n_workers):
+    """상품 그룹들을 워커별로 균등 분배 (건수 기준 밸런싱).
+
+    가장 큰 그룹부터 가장 적은 워커에 할당 (greedy).
+    """
+    # (건수, (prod, cov), [idnos]) 내림차순
+    sorted_groups = sorted(
+        [(len(ids), pcv, ids) for pcv, ids in pcv_groups.items()],
+        key=lambda x: -x[0]
+    )
+
+    # 워커별 할당: (총건수, [((prod,cov), [idnos]), ...])
+    worker_loads = [(0, i, []) for i in range(n_workers)]
+
+    import heapq
+    for count, pcv, ids in sorted_groups:
+        load, wid, assignments = heapq.heappop(worker_loads)
+        assignments.append((pcv, ids))
+        heapq.heappush(worker_loads, (load + count, wid, assignments))
+
+    # worker_id → assignments
+    result = {}
+    for load, wid, assignments in worker_loads:
+        if assignments:
+            result[wid] = (assignments, load)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 단일 프로세스 모드
+# ---------------------------------------------------------------------------
+
+def _run_single_process(con, pcv_groups, loader, exp_cache, dc_curve,
+                        preload, chunk_size, run_id, out_con):
+    """단일 프로세스 실행 (기존 방식, 디버그/소량용)."""
+    trad_cache_all = None
+    bn_cache_all = None
+    if preload:
+        trad_cache_all = TradPVDataCache(con)
+        bn_cache_all = BNDataCache(con)
+
+    total_target = sum(len(ids) for ids in pcv_groups.values())
+    total_groups = len(pcv_groups)
+    batch_rows = []
+    ok = err = 0
+    processed = 0
+    t_start = time.time()
+
+    for gi, ((prod, cov), group_ids) in enumerate(pcv_groups.items()):
+        if not group_ids:
+            continue
+
+        if preload:
+            trad_cache = trad_cache_all
+            bn_cache = bn_cache_all
+        else:
+            trad_cache = TradPVDataCache(con, idno_filter=set(group_ids))
+            bn_cache = BNDataCache(con, pcv_filter=[(prod, cov)])
+
+        for ci in range(0, len(group_ids), chunk_size):
+            chunk_ids = group_ids[ci:ci + chunk_size]
+
+            for idno in chunk_ids:
+                try:
+                    row = _compute_one(
+                        con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno)
+                    if row:
+                        row["RUN_ID"] = run_id
+                        batch_rows.append(row)
+                        ok += 1
+                    else:
+                        err += 1
+                except Exception as e:
+                    err += 1
+                    if err <= 5:
+                        print(f"  ERR IDNO={idno}: {e}")
+
+                processed += 1
+
+            if batch_rows:
+                df = pd.DataFrame(batch_rows)
+                out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+                batch_rows = []
+
+        elapsed = time.time() - t_start
+        rate = processed / elapsed if elapsed > 0 else 0
+        eta = (total_target - processed) / rate if rate > 0 else 0
+        print(f"  [{processed:,}/{total_target:,}] "
+              f"그룹 {gi+1}/{total_groups} ({prod}/{cov}, {len(group_ids)}건) "
+              f"OK={ok:,} ERR={err} "
+              f"{rate:.0f}건/s ETA={eta:.0f}s")
+
+    if batch_rows:
+        df = pd.DataFrame(batch_rows)
+        out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+
+    return ok, err
+
+
+# ---------------------------------------------------------------------------
+# 멀티프로세스 모드
+# ---------------------------------------------------------------------------
+
+def _run_multi_process(db_path, pcv_groups, dc_curve, preload, n_workers,
+                       run_id, out_con):
+    """멀티프로세스 병렬 실행."""
+    distribution = _distribute_groups(pcv_groups, n_workers)
+
+    total_target = sum(len(ids) for ids in pcv_groups.values())
+    print(f"  워커 {len(distribution)}개에 분배:")
+    for wid, (assignments, load) in sorted(distribution.items()):
+        n_grps = len(assignments)
+        print(f"    워커 {wid}: {load:,}건 ({n_grps}그룹)")
+
+    # 워커 태스크 생성
+    tasks = []
+    for wid, (assignments, load) in distribution.items():
+        tasks.append((db_path, wid, assignments, dc_curve, preload))
+
+    # 병렬 실행
+    t_start = time.time()
+    print(f"\n  병렬 산출 시작 ({n_workers} workers)...")
+
+    with mp.Pool(processes=n_workers) as pool:
+        results = pool.map(_worker_process, tasks)
+
+    # 결과 집계 + DB 쓰기
+    ok = err = 0
+    for worker_id, rows, w_ok, w_err, w_msgs in results:
+        ok += w_ok
+        err += w_err
+        for msg in w_msgs:
+            print(f"  ERR (워커{worker_id}) {msg}")
+
+        if rows:
+            for row in rows:
+                row["RUN_ID"] = run_id
+            df = pd.DataFrame(rows)
+            out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+
+    elapsed = time.time() - t_start
+    rate = ok / elapsed if elapsed > 0 else 0
+    print(f"  병렬 산출 완료: {ok:,}건 {elapsed:.1f}s ({rate:.0f}건/s)")
+
+    return ok, err
+
+
+# ---------------------------------------------------------------------------
 # 메인
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="OP_BEL 배치 산출 (청크 기반)")
+    parser = argparse.ArgumentParser(description="OP_BEL 배치 산출 (청크 기반 + 병렬)")
     parser.add_argument("--n", type=int, default=None, help="건수 제한")
     parser.add_argument("--db", type=str, default="duckdb_transform.duckdb")
     parser.add_argument("-o", "--output", type=str, default="output_bel.duckdb",
                         help="출력 DB (기본: output_bel.duckdb)")
     parser.add_argument("--chunk", type=int, default=5000,
-                        help="IDNO 청크 크기 (기본: 5000)")
+                        help="IDNO 청크 크기 (기본: 5000, 단일프로세스 모드)")
+    parser.add_argument("--workers", "-w", type=int, default=None,
+                        help="병렬 워커 수 (기본: CPU수-1, 1이면 단일프로세스)")
     parser.add_argument("--run-id", type=int, default=None,
                         help="실행번호 지정 (미지정 시 자동 채번)")
     parser.add_argument("--reset", action="store_true",
@@ -155,8 +373,14 @@ def main():
     parser.add_argument("--reset-run", type=int, default=None,
                         help="특정 실행번호 결과만 삭제 후 재실행")
     parser.add_argument("--preload", action="store_true",
-                        help="전건 캐시 프리로드 (메모리 충분 시 사용, 더 빠름)")
+                        help="전건 캐시 프리로드 (메모리 충분 시, 워커별 독립 로드)")
     args = parser.parse_args()
+
+    # 워커 수 결정
+    n_workers = args.workers
+    if n_workers is None:
+        n_workers = max(1, mp.cpu_count() - 1)
+    n_workers = max(1, n_workers)
 
     con = duckdb.connect(args.db, read_only=True)
 
@@ -186,11 +410,9 @@ def main():
         pcv_groups[(prod, cov)].append(idno)
 
     # 건수 제한
-    all_ids = [idno for _, prod, cov in rows for idno in [_] if True]  # placeholder
     all_ids = [r[0] for r in rows]
     if args.n:
         all_ids = all_ids[:args.n]
-        # 제한된 ID만 남기도록 그룹 재구성
         id_set = set(all_ids)
         pcv_groups = {
             k: [i for i in v if i in id_set]
@@ -200,103 +422,55 @@ def main():
 
     total_target = len(all_ids)
     total_groups = len(pcv_groups)
+    mode_str = f"병렬 {n_workers}워커" if n_workers > 1 else "단일프로세스"
 
     print(f"{'='*60}")
-    print(f"  OP_BEL 배치 산출  RUN_ID={run_id}")
-    print(f"  대상: {total_target:,}건  상품그룹: {total_groups}개  청크: {args.chunk}")
+    print(f"  OP_BEL 배치 산출  RUN_ID={run_id}  [{mode_str}]")
+    print(f"  대상: {total_target:,}건  상품그룹: {total_groups}개")
     print(f"{'='*60}")
 
     # RUN_LOG 시작 기록
     out_con.execute(
-        "INSERT INTO RUN_LOG (RUN_ID, STARTED_AT, TOTAL_TARGET, STATUS) VALUES (?, ?, ?, ?)",
-        [run_id, started_at, total_target, "RUNNING"])
+        "INSERT INTO RUN_LOG (RUN_ID, STARTED_AT, TOTAL_TARGET, WORKERS, STATUS) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [run_id, started_at, total_target, n_workers, "RUNNING"])
 
-    # 공통 캐시 (상품 독립적인 것들)
-    print("공통 캐시 로드 중...")
-    t0 = time.time()
-    loader = RawAssumptionLoader(con)
-    loader.preload_contracts()
-    exp_cache = ExpDataCache(con)
+    t_total = time.time()
 
-    if args.preload:
-        # 전건 프리로드 모드
-        print("  전건 프리로드: TradPV + BN 캐시...")
-        trad_cache_all = TradPVDataCache(con)
-        bn_cache_all = BNDataCache(con)
-        dc_curve = trad_cache_all.dc_rt_curve
+    if n_workers == 1:
+        # 단일 프로세스 모드
+        print("공통 캐시 로드 중...")
+        t0 = time.time()
+        loader = RawAssumptionLoader(con)
+        loader.preload_contracts()
+        exp_cache = ExpDataCache(con)
+
+        if not args.preload:
+            dc_curve_rows = con.execute(
+                "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
+            ).fetchall()
+            dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
+        else:
+            dc_curve = None  # _run_single_process에서 TradPVDataCache에서 가져감
+
+        print(f"공통 캐시 로드: {time.time() - t0:.1f}s")
+
+        ok, err = _run_single_process(
+            con, pcv_groups, loader, exp_cache, dc_curve,
+            args.preload, args.chunk, run_id, out_con)
     else:
-        # dc_curve만 미리 로드 (상품 독립)
+        # 멀티프로세스 모드
+        # dc_curve 미리 로드 (직렬화용)
         dc_curve_rows = con.execute(
             "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
-        trad_cache_all = None
-        bn_cache_all = None
 
-    print(f"공통 캐시 로드: {time.time() - t0:.1f}s")
+        ok, err = _run_multi_process(
+            args.db, pcv_groups, dc_curve, args.preload, n_workers,
+            run_id, out_con)
 
-    # 산출
-    print("산출 시작...")
-    t_start = time.time()
-    batch_rows = []
-    ok = err = 0
-    processed = 0
-
-    for gi, ((prod, cov), group_ids) in enumerate(pcv_groups.items()):
-        if not group_ids:
-            continue
-
-        # 상품 그룹별 캐시 로드
-        if args.preload:
-            trad_cache = trad_cache_all
-            bn_cache = bn_cache_all
-        else:
-            # 그룹의 전체 IDNO로 TradPV 캐시 로드
-            trad_cache = TradPVDataCache(con, idno_filter=set(group_ids))
-            bn_cache = BNDataCache(con, pcv_filter=[(prod, cov)])
-
-        # 그룹 내 IDNO를 청크로 분할
-        for ci in range(0, len(group_ids), args.chunk):
-            chunk_ids = group_ids[ci:ci + args.chunk]
-
-            for idno in chunk_ids:
-                try:
-                    row = _compute_one(
-                        con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno)
-                    if row:
-                        row["RUN_ID"] = run_id
-                        batch_rows.append(row)
-                        ok += 1
-                    else:
-                        err += 1
-                except Exception as e:
-                    err += 1
-                    if err <= 5:
-                        print(f"  ERR IDNO={idno}: {e}")
-
-                processed += 1
-
-            # 청크 단위 DB 쓰기
-            if batch_rows:
-                df = pd.DataFrame(batch_rows)
-                out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
-                batch_rows = []
-
-        # 진행 상황 (그룹 단위)
-        elapsed = time.time() - t_start
-        rate = processed / elapsed if elapsed > 0 else 0
-        eta = (total_target - processed) / rate if rate > 0 else 0
-        print(f"  [{processed:,}/{total_target:,}] "
-              f"그룹 {gi+1}/{total_groups} ({prod}/{cov}, {len(group_ids)}건) "
-              f"OK={ok:,} ERR={err} "
-              f"{rate:.0f}건/s ETA={eta:.0f}s")
-
-    # 잔여 쓰기
-    if batch_rows:
-        df = pd.DataFrame(batch_rows)
-        out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
-
-    total_time = time.time() - t_start
+    total_time = time.time() - t_total
     finished_at = datetime.now()
 
     # RUN_LOG 업데이트
@@ -310,12 +484,14 @@ def main():
     # 결과 출력
     total_rows = out_con.execute(
         "SELECT COUNT(*) FROM OP_BEL WHERE RUN_ID = ?", [run_id]).fetchone()[0]
+    rate = ok / total_time if total_time > 0 else 0
     print(f"\n{'='*60}")
     print(f"  OP_BEL 배치 산출 완료  RUN_ID={run_id}")
     print(f"{'='*60}")
+    print(f"  모드: {mode_str}")
     print(f"  산출: {ok:,} / {total_target:,} (ERR={err})")
     print(f"  출력: {args.output} ({total_rows:,}행)")
-    print(f"  소요: {total_time:.1f}s ({ok/total_time:.0f}건/s)")
+    print(f"  소요: {total_time:.1f}s ({rate:.0f}건/s)")
     print(f"{'='*60}")
 
     out_con.close()
