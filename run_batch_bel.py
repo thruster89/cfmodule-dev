@@ -156,7 +156,7 @@ def _compute_one(con, loader, trad_cache, bn_cache, exp_cache, dc_curve, idno,
         timings["cf_bel"] = timings.get("cf_bel", 0) + (t6 - t5)
         timings["_count"] = timings.get("_count", 0) + 1
 
-    row = {"INFRC_IDNO": idno}
+    row = {"INFRC_IDNO": idno, "RUN_ID": 0}
     row.update(bel.to_dict())
     return row
 
@@ -242,7 +242,8 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
         t_flush = time.time()
         if batch_rows:
             df = pd.DataFrame(batch_rows)
-            out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+            out_con.execute(
+                "INSERT INTO OP_BEL BY NAME SELECT * FROM df")
             batch_rows = []
         flush_sec = time.time() - t_flush
 
@@ -370,7 +371,8 @@ def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
             for row in w_rows:
                 row["RUN_ID"] = run_id
             df = pd.DataFrame(w_rows)
-            out_con.execute("INSERT INTO OP_BEL SELECT * FROM df")
+            out_con.execute(
+                "INSERT INTO OP_BEL BY NAME SELECT * FROM df")
 
         # 워커별 타이밍 출력
         if w_timings:
