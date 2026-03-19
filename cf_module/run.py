@@ -8,8 +8,9 @@ Usage:
     python -m cf_module.run --idno 760397 --debug        # 전체 중간테이블 CSV 출력
     python -m cf_module.run --idno 760397 --debug --save RSK_RT,CF,BEL  # 선택 출력
 """
+import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import duckdb
 import numpy as np
@@ -21,16 +22,41 @@ from cf_module.calc.exp import ExpResult, compute_exp
 from cf_module.calc.pvcf import PVCFResult, compute_pvcf
 from cf_module.calc.tbl_bn import BNResult, compute_bn
 from cf_module.calc.tbl_lapse_rt import compute_lapse_rt
-from cf_module.calc.tbl_mn import compute_tbl_mn
+from cf_module.calc.tbl_mn import MNResult, compute_tbl_mn
 from cf_module.calc.tbl_rsk_rt import compute_rsk_rt
 from cf_module.calc.trad_pv import TradPVResult, apply_soff_af_netting, compute_trad_pv
+from cf_module.constants import DEFAULT_BN_CLS
 from cf_module.data.bn_loader import BNDataCache
 from cf_module.data.exp_loader import ExpDataCache
 from cf_module.data.rsk_lapse_loader import ContractInfo, RawAssumptionLoader
 from cf_module.data.trad_pv_loader import TradPVDataCache, build_contract_info_cached
+from cf_module.utils.logger import get_logger
+
+logger = get_logger("run")
 
 # 전체 테이블 순서
 ALL_TABLES = ["RSK_RT", "LAPSE_RT", "MN", "TRAD_PV", "BN", "EXP", "CF", "DC_RT", "PVCF", "BEL"]
+
+
+# ---------------------------------------------------------------------------
+# PipelineContext: 파이프라인 공유 자원을 하나로 묶는다
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PipelineContext:
+    """파이프라인 실행에 필요한 공유 자원.
+
+    배치/단건 모두 동일한 인터페이스로 사용.
+    개별 파라미터 나열 대신 ctx 하나만 전달하여 시그니처를 단순화한다.
+    """
+    con: Any                              # duckdb connection
+    loader: RawAssumptionLoader
+    trad_cache: TradPVDataCache
+    bn_cache: BNDataCache
+    exp_cache: ExpDataCache
+    dc_curve: np.ndarray
+    polno_map: Optional[dict] = None      # {idno: (polno, [(idno,cov)])}
+    mn_cache: Optional[dict] = None       # {idno: (rsk_rt, lapse_rt, tbl_mn)}
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +71,7 @@ class SingleResult:
     ctr: ContractInfo
     rsk_rt: Dict[str, dict] = field(default_factory=dict)
     lapse_rt: dict = field(default_factory=dict)
-    tbl_mn: dict = field(default_factory=dict)
+    tbl_mn: Optional[MNResult] = field(default_factory=MNResult)
     trad_pv: Optional[TradPVResult] = None
     tbl_bn: Optional[BNResult] = None
     exp_results: Optional[List[ExpResult]] = None
@@ -160,7 +186,8 @@ def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps,
             g_ctr_trme = g_mn.get("CTR_TRME_MTNPSN_CNT")
         try:
             r = compute_trad_pv(g_info, g_n, pay_trmo=g_pay_trmo, ctr_trmo=g_ctr_trmo, ctr_trme=g_ctr_trme)
-        except Exception:
+        except Exception as e:
+            logger.debug("TRAD_PV skip gid=%d: %s", gid, e)
             continue
         results[gid] = r
         if g_ctr_trme is not None:
@@ -179,7 +206,7 @@ def _compute_trad_pv_single(con, loader, trad_cache, idno, tbl_mn, n_steps,
 def _compute_bn_single(con, bn_cache, ctr, rsk_rt, lapse_rt, n_steps, acum_bnft=None):
     """TBL_BN."""
     p, cl, cv = ctr.prod_cd, ctr.cls_cd, ctr.cov_cd
-    bn_cls = "01"
+    bn_cls = DEFAULT_BN_CLS
     bnft_mapping = bn_cache.get_bnft_risk_mapping(p, bn_cls, cv)
     if not bnft_mapping:
         bn_cls = cl

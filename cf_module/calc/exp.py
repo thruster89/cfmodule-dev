@@ -7,6 +7,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from cf_module.constants import (
+    BASE_YYYYMM, EXP_DEFAULT_EPRD, EXP_DEFAULT_EYM, ExpDrvr,
+)
 from cf_module.data.exp_loader import ExpDataCache
 
 
@@ -30,7 +33,7 @@ def compute_exp(
     loan_remamt: Optional[np.ndarray] = None,
     cncttp_kics: Optional[np.ndarray] = None,
     bnft_insuamt: Optional[np.ndarray] = None,
-    base_yyyymm: int = 202309,
+    base_yyyymm: int = BASE_YYYYMM,
 ) -> List[ExpResult]:
     """사업비 산출.
 
@@ -71,13 +74,13 @@ def compute_exp(
 
             # 시간 제약: ACQS EPRD
             if tpcd == "ACQS":
-                eprd = item.get("eprd", 999999)
+                eprd = item.get("eprd", EXP_DEFAULT_EPRD)
                 if t >= eprd:
                     continue
 
             # 시간 제약: MNT EYM
             if tpcd == "MNT" and item.get("eym_yn", 0) == 1:
-                eym = item.get("eym", 299999)
+                eym = item.get("eym", EXP_DEFAULT_EYM)
                 yyyymm = _t_to_yyyymm(base_yyyymm, step)
                 if yyyymm > eym:
                     continue
@@ -96,25 +99,25 @@ def compute_exp(
             else:
                 rate = item.get("rate", 0.0)
 
-            # 기초금액 계산
-            if drvr == 1:
+            # 기초금액 계산 (드라이버별 공식)
+            if drvr == ExpDrvr.GPREM_RATE:
                 base_val = rate * gprem
-            elif drvr == 2:
+            elif drvr == ExpDrvr.FIXED_AMOUNT:
                 base_val = rate  # 절대금액
-            elif drvr == 4:
+            elif drvr == ExpDrvr.FIXED_VALUE:
                 base_val = item.get("rate", 0.0)  # LSVY 고정값
-            elif drvr == 6:
+            elif drvr == ExpDrvr.LOAN_RATE:
                 lv = loan_remamt[step] if loan_remamt is not None and step < len(loan_remamt) else 0
                 base_val = rate * lv
-            elif drvr == 9:
+            elif drvr == ExpDrvr.CNCTTP_RATE:
                 kv = cncttp_kics[step] if cncttp_kics is not None and step < len(cncttp_kics) else 0
                 base_val = rate * kv
-            elif drvr == 10:
+            elif drvr == ExpDrvr.CNCTTP_MINUS_LOAN:
                 kv = cncttp_kics[step] if cncttp_kics is not None and step < len(cncttp_kics) else 0
                 lv = loan_remamt[step] if loan_remamt is not None and step < len(loan_remamt) else 0
                 base_val = rate * (kv - lv)
             else:
-                base_val = rate * gprem  # fallback
+                base_val = rate * gprem  # fallback (미정의 드라이버)
 
             # 물가상승 보정 (PRCE_ASC_RT_APLY_YN=1)
             if prce == 1 and cache.monthly_esc > 1.0 and step >= 2:
