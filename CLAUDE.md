@@ -18,15 +18,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running
 
 ```bash
-# 단건 전체 파이프라인 (RSK_RT → BEL, 10개 CSV 출력)
+# 단건 전체 파이프라인 (BEL만 출력 — 기본)
 python -m cf_module.run --idno 760397
 
 # 특정 단계까지만
 python -m cf_module.run --idno 760397 --table MN
 python -m cf_module.run --idno 760397 --table CF
 
-# 상세 출력
+# 디버그: 전체 중간테이블 CSV 출력 + 요약
 python -m cf_module.run --idno 760397 --debug
+
+# 디버그: 특정 테이블만 선택 저장
+python -m cf_module.run --idno 760397 --debug --save RSK_RT,CF,BEL
 
 # 전건 배치 BEL 산출 (42,001건 → DuckDB)
 python run_batch_bel.py
