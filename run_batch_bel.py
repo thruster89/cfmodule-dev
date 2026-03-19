@@ -442,7 +442,7 @@ def main():
 
         if not args.preload:
             dc_curve_rows = con.execute(
-                "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
+                "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
             ).fetchall()
             dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
         else:
@@ -457,7 +457,7 @@ def main():
         # 멀티프로세스 모드
         # dc_curve 미리 로드 (직렬화용)
         dc_curve_rows = con.execute(
-            "SELECT DC_RT FROM IE_DC_RT ORDER BY CTR_AFT_PASS_MMCNT"
+            "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
 
