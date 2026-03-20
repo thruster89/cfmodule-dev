@@ -352,12 +352,18 @@ def _worker_process(task):
     Returns:
         (worker_id, rows, ok_count, err_count, err_msgs)
     """
-    db_path, worker_id, worker_items, dc_curve, chunk_size = task
+    db_path, worker_id, worker_items, dc_curve, chunk_size, preload_data = task
 
     con = duckdb.connect(db_path, read_only=True)
     loader = RawAssumptionLoader(con)
     all_ids = _chunk_idnos(worker_items)
     loader.preload_contracts(idnos=all_ids)
+    # 메인 프로세스에서 전달받은 프리로드 데이터 주입
+    if preload_data is not None:
+        loader._mort_preload = preload_data["mort"]
+        loader._lapse_preload = preload_data["lapse"]
+        loader._beprd_preload = preload_data["beprd"]
+        loader._skew_preload = preload_data["skew"]
     exp_cache = ExpDataCache(con)
     polno_map = _build_polno_map(con)
 
@@ -407,7 +413,7 @@ def _worker_process(task):
 
 
 def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
-                       chunk_size, run_id, out_con):
+                       chunk_size, run_id, out_con, preload_data=None):
     """멀티프로세스 병렬 실행. IDNO 균등분배 → 워커 내 청크 처리."""
     total_target = len(flat_list)
 
@@ -420,11 +426,11 @@ def _run_multi_process(db_path, flat_list, dc_curve, n_workers,
     for wid in range(n_workers):
         print(f"    워커 {wid}: {len(worker_items[wid]):,}건")
 
-    # 워커 태스크 생성
+    # 워커 태스크 생성 (프리로드 데이터 포함)
     tasks = []
     for wid in range(n_workers):
         if worker_items[wid]:
-            tasks.append((db_path, wid, worker_items[wid], dc_curve, chunk_size))
+            tasks.append((db_path, wid, worker_items[wid], dc_curve, chunk_size, preload_data))
 
     # 병렬 실행
     t_start = time.time()
@@ -576,15 +582,28 @@ def main():
             con, flat_list, loader, exp_cache, dc_curve,
             args.preload, args.chunk, run_id, out_con, polno_map=polno_map)
     else:
-        # 멀티프로세스 모드
+        # 멀티프로세스 모드 — 메인에서 1회 프리로드 → 워커에 전달
+        print("공통 데이터 프리로드 중 (메인 프로세스)...")
+        t0 = time.time()
+        tmp_loader = RawAssumptionLoader(con)
+        tmp_loader.preload_data_tables()
+        preload_data = {
+            "mort": tmp_loader._mort_preload,
+            "lapse": tmp_loader._lapse_preload,
+            "beprd": tmp_loader._beprd_preload,
+            "skew": tmp_loader._skew_preload,
+        }
+        del tmp_loader
+
         dc_curve_rows = con.execute(
             "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
+        print(f"공통 프리로드: {time.time() - t0:.1f}s")
 
         ok, err = _run_multi_process(
             args.db, flat_list, dc_curve, n_workers,
-            args.chunk, run_id, out_con)
+            args.chunk, run_id, out_con, preload_data=preload_data)
 
     total_time = time.time() - t_total
     finished_at = datetime.now()
