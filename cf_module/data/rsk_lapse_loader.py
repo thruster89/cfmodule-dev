@@ -96,6 +96,10 @@ class RawAssumptionLoader:
         self._lapse_preload = None   # DataFrame or None
         self._beprd_preload = None   # DataFrame or None
         self._skew_preload = None    # DataFrame or None
+        self._risk_preload = None    # {(prod,cls,cov): [RiskInfo, ...]}
+        self._cov_rskrt_preload = None  # {(prod,cls,cov): {rsk_cd: (rsvamt, pyexsp)}}
+        self._bnft_rskrt_preload = None # {(prod,cls,cov): {rsk_cd: (bnft_drpo, min_rskrt_yn)}}
+        self._chr_preload = None     # {rsk_cd: row_tuple}
         self._preload_driver_tables()
         self._preload_cov_def_cd()
 
@@ -171,7 +175,92 @@ class RawAssumptionLoader:
         import time
         t0 = time.time()
 
-        # IR_RSKRT_VAL: RSK_RT_CD별로 그룹화
+        # ── risk 코드 관련 3개 테이블 ──
+        print("    RISK (IP_R_RSKRT_C+CHR) 로드 중...", end="", flush=True)
+        rows = self.conn.execute(f"""
+            SELECT r.PROD_CD, r.CLS_CD, r.COV_CD,
+                   r.RSK_RT_CD, chr.RSK_RT_CHR_CD, chr.MM_TRF_WAY_CD,
+                   chr.DEAD_RT_DVCD, r.RSK_GRP_NO,
+                   chr.RSK_RT_DIV_VAL_DEF_CD1, chr.RSK_RT_DIV_VAL_DEF_CD2,
+                   chr.RSK_RT_DIV_VAL_DEF_CD3, chr.RSK_RT_DIV_VAL_DEF_CD4,
+                   chr.RSK_RT_DIV_VAL_DEF_CD5, chr.RSK_RT_DIV_VAL_DEF_CD6,
+                   chr.RSK_RT_DIV_VAL_DEF_CD7, chr.RSK_RT_DIV_VAL_DEF_CD8,
+                   chr.RSK_RT_DIV_VAL_DEF_CD9, chr.RSK_RT_DIV_VAL_DEF_CD10
+            FROM {self.p}IP_R_RSKRT_C r
+            JOIN {self.p}IR_RSKRT_CHR chr ON chr.RSK_RT_CD = r.RSK_RT_CD
+            ORDER BY r.PROD_CD, r.CLS_CD, r.COV_CD, r.RSK_RT_CD
+        """).fetchall()
+        # (prod, cls, cov) → [RiskInfo, ...]
+        self._risk_preload = {}
+        for r in rows:
+            key = (str(r[0]), str(r[1]), str(r[2]))
+            rsk_cd = str(r[3])
+            def_cds = [str(r[i]) if r[i] is not None else None for i in range(8, 18)]
+            ri = RiskInfo(
+                risk_cd=rsk_cd,
+                chr_cd=str(r[4]) if r[4] else "A",
+                mm_trf_way_cd=int(r[5]) if r[5] else 1,
+                dead_rt_dvcd=int(r[6]) if r[6] is not None else 1,
+                rsk_grp_no=str(r[7]) if r[7] is not None else "0",
+                def_cds=def_cds,
+            )
+            self._risk_preload.setdefault(key, []).append(ri)
+        t_risk = time.time()
+        print(f" {len(rows):,}행 {t_risk-t0:.1f}s", flush=True)
+
+        print("    COV_RSKRT (IP_R_COV_RSKRT_C) 로드 중...", end="", flush=True)
+        rows = self.conn.execute(f"""
+            SELECT PROD_CD, CLS_CD, COV_CD, RSK_RT_CD,
+                   RSVAMT_DEFRY_DRPO_RSKRT_YN, PYEXSP_DRPO_RSKRT_YN
+            FROM {self.p}IP_R_COV_RSKRT_C
+        """).fetchall()
+        # (prod, cls, cov) → {rsk_cd: (rsvamt, pyexsp)}
+        self._cov_rskrt_preload = {}
+        for r in rows:
+            key = (str(r[0]), str(r[1]), str(r[2]))
+            cd = str(r[3])
+            rsvamt = int(r[4]) if r[4] is not None else 0
+            pyexsp = int(r[5]) if r[5] is not None else 0
+            self._cov_rskrt_preload.setdefault(key, {})[cd] = (rsvamt, pyexsp)
+        t_cov = time.time()
+        print(f" {len(rows):,}행 {t_cov-t_risk:.1f}s", flush=True)
+
+        print("    BNFT_RSKRT (IP_R_BNFT_RSKRT_C) 로드 중...", end="", flush=True)
+        rows = self.conn.execute(f"""
+            SELECT PROD_CD, CLS_CD, COV_CD, RSK_RT_CD,
+                   MAX(BNFT_DRPO_RSKRT_YN), MIN(BNFT_RSKRT_YN)
+            FROM {self.p}IP_R_BNFT_RSKRT_C
+            GROUP BY PROD_CD, CLS_CD, COV_CD, RSK_RT_CD
+        """).fetchall()
+        # (prod, cls, cov) → {rsk_cd: (bnft_drpo, min_rskrt_yn)}
+        self._bnft_rskrt_preload = {}
+        for r in rows:
+            key = (str(r[0]), str(r[1]), str(r[2]))
+            cd = str(r[3])
+            bnft_drpo = int(r[4]) if r[4] is not None else 0
+            min_rskrt_yn = int(r[5]) if r[5] is not None else 1
+            self._bnft_rskrt_preload.setdefault(key, {})[cd] = (bnft_drpo, min_rskrt_yn)
+        t_bnft = time.time()
+        print(f" {len(rows):,}행 {t_bnft-t_cov:.1f}s", flush=True)
+
+        # IR_RSKRT_CHR 전건 (extra_risk_codes용)
+        print("    RSKRT_CHR (IR_RSKRT_CHR) 로드 중...", end="", flush=True)
+        rows = self.conn.execute(f"""
+            SELECT RSK_RT_CD, RSK_RT_CHR_CD, MM_TRF_WAY_CD, DEAD_RT_DVCD,
+                   RSK_RT_DIV_VAL_DEF_CD1, RSK_RT_DIV_VAL_DEF_CD2,
+                   RSK_RT_DIV_VAL_DEF_CD3, RSK_RT_DIV_VAL_DEF_CD4,
+                   RSK_RT_DIV_VAL_DEF_CD5, RSK_RT_DIV_VAL_DEF_CD6,
+                   RSK_RT_DIV_VAL_DEF_CD7, RSK_RT_DIV_VAL_DEF_CD8,
+                   RSK_RT_DIV_VAL_DEF_CD9, RSK_RT_DIV_VAL_DEF_CD10
+            FROM {self.p}IR_RSKRT_CHR
+        """).fetchall()
+        self._chr_preload = {}
+        for r in rows:
+            self._chr_preload[str(r[0])] = r
+        t_chr = time.time()
+        print(f" {len(rows):,}행 {t_chr-t_bnft:.1f}s", flush=True)
+
+        # ── 기존: IR_RSKRT_VAL ──
         print("    MORT (IR_RSKRT_VAL) 로드 중...", end="", flush=True)
         rows = self.conn.execute(f"""
             SELECT RSK_RT_CD, AGE, RSK_RT,
@@ -276,14 +365,23 @@ class RawAssumptionLoader:
     # 위험률코드 매핑
     # ------------------------------------------------------------------
     def load_risk_codes(self, ctr: ContractInfo) -> List[RiskInfo]:
-        """IP_R_RSKRT_C (전체 위험률코드) + IR_RSKRT_CHR (특성) 조인.
-
-        IP_R_COV_RSKRT_C에는 일부 코드만 있고, IP_R_RSKRT_C에 전체가 있음.
-        111018 같은 코드는 IP_R_COV_RSKRT_C에 없지만 IP_R_RSKRT_C에 존재.
-        """
+        """IP_R_RSKRT_C (전체 위험률코드) + IR_RSKRT_CHR (특성) 조인."""
         key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
         if key in self._cache_risk_codes:
             return self._cache_risk_codes[key]
+
+        # 프리로드 모드: 인메모리에서 조회 (중복 제거)
+        if self._risk_preload is not None:
+            all_ri = self._risk_preload.get(key, [])
+            result = []
+            seen = set()
+            for ri in all_ri:
+                if ri.risk_cd not in seen:
+                    seen.add(ri.risk_cd)
+                    result.append(ri)
+            self._cache_risk_codes[key] = result
+            return result
+
         rows = self.conn.execute(f"""
             SELECT r.RSK_RT_CD,
                    chr.RSK_RT_CHR_CD,
@@ -771,7 +869,6 @@ class RawAssumptionLoader:
         """
         key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
         if key in self._cache_exit_flags:
-            # 캐시 결과 + risks에 있는 코드 보강
             cached = self._cache_exit_flags[key]
             rsk_cds = [r.risk_cd for r in risks]
             result = {cd: cached.get(cd, {"rsvamt": 0, "bnft": 0, "pyexsp": 0}) for cd in rsk_cds}
@@ -780,7 +877,25 @@ class RawAssumptionLoader:
         rsk_cds = [r.risk_cd for r in risks]
         flags = {cd: {"rsvamt": 0, "bnft": 0, "pyexsp": 0} for cd in rsk_cds}
 
-        # IP_R_COV_RSKRT_C → RSVAMT + PYEXSP
+        # 프리로드 모드
+        if self._cov_rskrt_preload is not None:
+            cov_map = self._cov_rskrt_preload.get(key, {})
+            for cd, (rsvamt, pyexsp) in cov_map.items():
+                if cd not in flags:
+                    flags[cd] = {"rsvamt": 0, "bnft": 0, "pyexsp": 0}
+                flags[cd]["rsvamt"] = rsvamt
+                flags[cd]["pyexsp"] = pyexsp
+
+            bnft_map = self._bnft_rskrt_preload.get(key, {}) if self._bnft_rskrt_preload else {}
+            for cd, (bnft_drpo, min_rskrt_yn) in bnft_map.items():
+                if cd not in flags:
+                    flags[cd] = {"rsvamt": 0, "bnft": 0, "pyexsp": 0}
+                flags[cd]["bnft"] = 1 if (bnft_drpo == 1 and min_rskrt_yn == 0) else 0
+
+            self._cache_exit_flags[key] = flags
+            return flags
+
+        # SQL 모드
         rows = self.conn.execute(f"""
             SELECT RSK_RT_CD, RSVAMT_DEFRY_DRPO_RSKRT_YN, PYEXSP_DRPO_RSKRT_YN
             FROM {self.p}IP_R_COV_RSKRT_C
@@ -793,10 +908,6 @@ class RawAssumptionLoader:
             flags[cd]["rsvamt"] = int(r[1]) if r[1] is not None else 0
             flags[cd]["pyexsp"] = int(r[2]) if r[2] is not None else 0
 
-        # IP_R_BNFT_RSKRT_C → BNFT
-        # 규칙: BNFT_DRPO_RSKRT_YN=1 AND MIN(BNFT_RSKRT_YN)=0
-        #   → BNFT_RSKRT_YN=0인 BNFT_NO가 있어야 탈퇴위험으로 인정
-        #   → 전부 BNFT_RSKRT_YN=1이면 급부산출 전용 (탈퇴에 미사용)
         rows = self.conn.execute(f"""
             SELECT RSK_RT_CD,
                    MAX(BNFT_DRPO_RSKRT_YN) as BNFT_YN,
@@ -811,7 +922,6 @@ class RawAssumptionLoader:
                 flags[cd] = {"rsvamt": 0, "bnft": 0, "pyexsp": 0}
             bnft_drpo = int(r[1]) if r[1] is not None else 0
             min_rskrt_yn = int(r[2]) if r[2] is not None else 1
-            # BNFT exit = DRPO=1 AND 최소 하나의 BNFT_NO에서 RSKRT_YN=0
             flags[cd]["bnft"] = 1 if (bnft_drpo == 1 and min_rskrt_yn == 0) else 0
 
         self._cache_exit_flags[key] = flags
@@ -839,6 +949,49 @@ class RawAssumptionLoader:
         if cache_key in self._cache_extra_risks:
             return self._cache_extra_risks[cache_key]
 
+        key = (ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
+
+        # 프리로드 모드: COV_RSKRT + BNFT_RSKRT에서 extra 코드 추출
+        if self._cov_rskrt_preload is not None:
+            extra_cds = set()
+            cov_map = self._cov_rskrt_preload.get(key, {})
+            bnft_map = self._bnft_rskrt_preload.get(key, {}) if self._bnft_rskrt_preload else {}
+            for cd in cov_map:
+                if cd not in existing_cds:
+                    extra_cds.add(cd)
+            for cd in bnft_map:
+                if cd not in existing_cds:
+                    extra_cds.add(cd)
+
+            if not extra_cds:
+                self._cache_extra_risks[cache_key] = []
+                return []
+
+            result = []
+            for rsk_cd in sorted(extra_cds):
+                chr_row = self._chr_preload.get(rsk_cd) if self._chr_preload else None
+                if chr_row:
+                    def_cds = [str(chr_row[i]) if chr_row[i] is not None else None
+                               for i in range(4, 14)]
+                    result.append(RiskInfo(
+                        risk_cd=rsk_cd,
+                        chr_cd=str(chr_row[1]) if chr_row[1] else "A",
+                        mm_trf_way_cd=int(chr_row[2]) if chr_row[2] else 1,
+                        dead_rt_dvcd=int(chr_row[3]) if chr_row[3] is not None else 0,
+                        rsk_grp_no=f"__{rsk_cd}__",
+                        def_cds=def_cds,
+                    ))
+                else:
+                    result.append(RiskInfo(
+                        risk_cd=rsk_cd,
+                        chr_cd="A", mm_trf_way_cd=1,
+                        dead_rt_dvcd=0, rsk_grp_no=f"__{rsk_cd}__",
+                    ))
+
+            self._cache_extra_risks[cache_key] = result
+            return result
+
+        # SQL 모드
         extra_cds = set()
         for tbl in ("IP_R_COV_RSKRT_C", "IP_R_BNFT_RSKRT_C"):
             rows = self.conn.execute(f"""
@@ -878,7 +1031,6 @@ class RawAssumptionLoader:
                     def_cds=def_cds,
                 ))
             else:
-                # IR_RSKRT_CHR에 없으면 사망위험 가상코드로 추가
                 result.append(RiskInfo(
                     risk_cd=rsk_cd,
                     chr_cd="A", mm_trf_way_cd=1,

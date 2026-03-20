@@ -380,6 +380,10 @@ def _worker_process(task):
         loader._lapse_preload = preload_data["lapse"]
         loader._beprd_preload = preload_data["beprd"]
         loader._skew_preload = preload_data["skew"]
+        loader._risk_preload = preload_data.get("risk")
+        loader._cov_rskrt_preload = preload_data.get("cov_rskrt")
+        loader._bnft_rskrt_preload = preload_data.get("bnft_rskrt")
+        loader._chr_preload = preload_data.get("chr")
         del preload_data
     exp_cache = ExpDataCache(con)
     polno_map = _build_polno_map(con)
@@ -610,6 +614,10 @@ def main():
             "lapse": tmp_loader._lapse_preload,
             "beprd": tmp_loader._beprd_preload,
             "skew": tmp_loader._skew_preload,
+            "risk": tmp_loader._risk_preload,
+            "cov_rskrt": tmp_loader._cov_rskrt_preload,
+            "bnft_rskrt": tmp_loader._bnft_rskrt_preload,
+            "chr": tmp_loader._chr_preload,
         }
         del tmp_loader
 
