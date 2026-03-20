@@ -173,6 +173,9 @@ def compute_bn(
     ctr_mm = np.arange(n_steps) + elapsed_mm
     duration_years = ctr_mm // 12 + 1
 
+    # duration unique 값 사전 계산 (급부 루프 밖)
+    uniq_dur = np.unique(duration_years)
+
     bnft_results = {}
 
     for bnft_no, mapping in sorted(bnft_mapping.items()):
@@ -245,7 +248,6 @@ def compute_bn(
         # DEFRY_RT — unique duration만 조회 후 매핑
         defry_rt_arr = np.ones(n_steps, dtype=np.float64)
         if get_defry_rate_fn:
-            uniq_dur = np.unique(duration_years)
             dur_to_defry = {int(d): get_defry_rate_fn(bnft_no, int(d)) for d in uniq_dur}
             for d, v in dur_to_defry.items():
                 defry_rt_arr[duration_years == d] = v
@@ -254,7 +256,6 @@ def compute_bn(
         prtt_rt_arr = np.zeros(n_steps, dtype=np.float64)
         has_prtt = False
         if get_prtt_rate_fn:
-            uniq_dur = np.unique(duration_years)
             dur_to_prtt = {int(d): get_prtt_rate_fn(bnft_no, int(d)) for d in uniq_dur}
             for d, v in dur_to_prtt.items():
                 prtt_rt_arr[duration_years == d] = v
