@@ -376,14 +376,16 @@ def _worker_process(task):
         import pickle
         with open(preload_file, 'rb') as f:
             preload_data = pickle.load(f)
-        loader._mort_preload = preload_data["mort"]
-        loader._lapse_preload = preload_data["lapse"]
-        loader._beprd_preload = preload_data["beprd"]
-        loader._skew_preload = preload_data["skew"]
+        # risk 관련 (mn_load_risk 78% 병목 해결)
         loader._risk_preload = preload_data.get("risk")
         loader._cov_rskrt_preload = preload_data.get("cov_rskrt")
         loader._bnft_rskrt_preload = preload_data.get("bnft_rskrt")
         loader._chr_preload = preload_data.get("chr")
+        # lapse 관련 (작음)
+        loader._lapse_preload = preload_data.get("lapse")
+        loader._beprd_preload = preload_data.get("beprd")
+        loader._skew_preload = preload_data.get("skew")
+        # MORT는 미포함 → 워커별 SQL+_data_cache로 처리
         del preload_data
     exp_cache = ExpDataCache(con)
     polno_map = _build_polno_map(con)
@@ -518,10 +520,11 @@ def main():
     args = parser.parse_args()
 
     # 워커 수 결정
+    MAX_WORKERS = 8
     n_workers = args.workers
     if n_workers is None:
-        n_workers = max(1, mp.cpu_count() - 1)
-    n_workers = max(1, n_workers)
+        n_workers = min(MAX_WORKERS, max(1, mp.cpu_count() - 1))
+    n_workers = max(1, min(n_workers, MAX_WORKERS))
 
     # --preload는 단일프로세스 전용
     if args.preload and n_workers > 1:
@@ -604,34 +607,38 @@ def main():
             args.preload, args.chunk, run_id, out_con, polno_map=polno_map)
     else:
         # 멀티프로세스 모드 — 메인에서 1회 프리로드 → 파일로 공유
+        # MORT(89만행)은 너무 커서 제외 → 워커별 SQL+_data_cache로 처리
         import pickle, tempfile
         print("공통 데이터 프리로드 중 (메인 프로세스)...")
         t0 = time.time()
         tmp_loader = RawAssumptionLoader(con)
-        tmp_loader.preload_data_tables()
+        tmp_loader.preload_data_tables(include_mort=False)
         preload_data = {
-            "mort": tmp_loader._mort_preload,
-            "lapse": tmp_loader._lapse_preload,
-            "beprd": tmp_loader._beprd_preload,
-            "skew": tmp_loader._skew_preload,
+            # risk 관련 (작음: 수천행) — mn_load_risk 78% 병목 해결
             "risk": tmp_loader._risk_preload,
             "cov_rskrt": tmp_loader._cov_rskrt_preload,
             "bnft_rskrt": tmp_loader._bnft_rskrt_preload,
             "chr": tmp_loader._chr_preload,
+            # lapse 관련 (작음: ~6천행)
+            "lapse": tmp_loader._lapse_preload,
+            "beprd": tmp_loader._beprd_preload,
+            "skew": tmp_loader._skew_preload,
+            # MORT는 제외 (89만행 → 워커 11개 복사 시 메모리 폭발)
         }
         del tmp_loader
 
-        # 파일에 1회 저장 → 워커가 각자 읽기 (pipe 직렬화 11x 방지)
+        # 파일에 1회 저장 → 워커가 각자 읽기
         preload_file = tempfile.mktemp(suffix='.pkl', prefix='cf_preload_')
         with open(preload_file, 'wb') as f:
             pickle.dump(preload_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        preload_mb = os.path.getsize(preload_file) / 1024 / 1024
         del preload_data
 
         dc_curve_rows = con.execute(
             "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
-        print(f"공통 프리로드 + 파일 저장: {time.time() - t0:.1f}s")
+        print(f"공통 프리로드 + 파일 저장: {time.time() - t0:.1f}s ({preload_mb:.1f}MB)")
 
         try:
             ok, err = _run_multi_process(
