@@ -120,7 +120,7 @@ def _compute_one(ctx: PipelineContext, idno: int, timings=None):
     if ctx.mn_cache is not None and idno in ctx.mn_cache:
         rsk_rt, lapse_rt, tbl_mn = ctx.mn_cache[idno]
     else:
-        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(ctx.loader, ctr, n_steps)
+        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(ctx.loader, ctr, n_steps, mn_timings=timings)
         if ctx.mn_cache is not None:
             ctx.mn_cache[idno] = (rsk_rt, lapse_rt, tbl_mn)
     t2 = time.time()
@@ -191,6 +191,19 @@ def _print_timings(timings, label=""):
         line = f"{prefix}  {key:>10s}: {v:7.2f}s ({pct:5.1f}%) avg {avg_ms:.2f}ms"
         print(line)
         batch_logger.info(line.strip())
+    # mn_chain 세부 분석
+    mn_keys = [k for k in timings if k.startswith("mn_")]
+    if mn_keys:
+        mn_total = timings.get("mn_chain", 1)
+        print(f"{prefix}  mn_chain 세부:")
+        for key in ["mn_load_risk", "mn_load_mort", "mn_calc_rsk",
+                     "mn_load_lapse", "mn_calc_lapse", "mn_calc_tblmn"]:
+            v = timings.get(key, 0)
+            pct = v / mn_total * 100 if mn_total > 0 else 0
+            avg_ms = v / n * 1000 if n > 0 else 0
+            line = f"{prefix}    {key:>15s}: {v:7.2f}s ({pct:5.1f}%) avg {avg_ms:.3f}ms"
+            print(line)
+            batch_logger.info(line.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -352,18 +365,22 @@ def _worker_process(task):
     Returns:
         (worker_id, rows, ok_count, err_count, err_msgs)
     """
-    db_path, worker_id, worker_items, dc_curve, chunk_size, preload_data = task
+    db_path, worker_id, worker_items, dc_curve, chunk_size, preload_file = task
 
     con = duckdb.connect(db_path, read_only=True)
     loader = RawAssumptionLoader(con)
     all_ids = _chunk_idnos(worker_items)
     loader.preload_contracts(idnos=all_ids)
-    # 메인 프로세스에서 전달받은 프리로드 데이터 주입
-    if preload_data is not None:
+    # 프리로드 파일에서 로드 (파일 경로 전달 → 워커가 1회 읽기)
+    if preload_file is not None:
+        import pickle
+        with open(preload_file, 'rb') as f:
+            preload_data = pickle.load(f)
         loader._mort_preload = preload_data["mort"]
         loader._lapse_preload = preload_data["lapse"]
         loader._beprd_preload = preload_data["beprd"]
         loader._skew_preload = preload_data["skew"]
+        del preload_data
     exp_cache = ExpDataCache(con)
     polno_map = _build_polno_map(con)
 
@@ -582,7 +599,8 @@ def main():
             con, flat_list, loader, exp_cache, dc_curve,
             args.preload, args.chunk, run_id, out_con, polno_map=polno_map)
     else:
-        # 멀티프로세스 모드 — 메인에서 1회 프리로드 → 워커에 전달
+        # 멀티프로세스 모드 — 메인에서 1회 프리로드 → 파일로 공유
+        import pickle, tempfile
         print("공통 데이터 프리로드 중 (메인 프로세스)...")
         t0 = time.time()
         tmp_loader = RawAssumptionLoader(con)
@@ -595,15 +613,25 @@ def main():
         }
         del tmp_loader
 
+        # 파일에 1회 저장 → 워커가 각자 읽기 (pipe 직렬화 11x 방지)
+        preload_file = tempfile.mktemp(suffix='.pkl', prefix='cf_preload_')
+        with open(preload_file, 'wb') as f:
+            pickle.dump(preload_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        del preload_data
+
         dc_curve_rows = con.execute(
             "SELECT DC_RT FROM IE_DC_RT ORDER BY PASS_PRD_NO"
         ).fetchall()
         dc_curve = np.array([r[0] for r in dc_curve_rows], dtype=np.float64)
-        print(f"공통 프리로드: {time.time() - t0:.1f}s")
+        print(f"공통 프리로드 + 파일 저장: {time.time() - t0:.1f}s")
 
-        ok, err = _run_multi_process(
-            args.db, flat_list, dc_curve, n_workers,
-            args.chunk, run_id, out_con, preload_data=preload_data)
+        try:
+            ok, err = _run_multi_process(
+                args.db, flat_list, dc_curve, n_workers,
+                args.chunk, run_id, out_con, preload_data=preload_file)
+        finally:
+            if os.path.exists(preload_file):
+                os.remove(preload_file)
 
     total_time = time.time() - t_total
     finished_at = datetime.now()

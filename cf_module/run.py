@@ -92,27 +92,45 @@ def compute_n_steps(ctr: ContractInfo) -> int:
 # STEP 1~3: RSK_RT → LAPSE_RT → TBL_MN
 # ---------------------------------------------------------------------------
 
-def _compute_mn_chain(loader, ctr, n_steps):
+def _compute_mn_chain(loader, ctr, n_steps, mn_timings=None):
     """RSK_RT → LAPSE_RT → TBL_MN."""
+    import time as _t
+    _t0 = _t.time()
     risks = loader.load_risk_codes(ctr)
     exit_flags = loader.load_exit_flags(ctr, risks)
     existing_cds = {r.risk_cd for r in risks}
     extra_risks = loader.load_extra_risk_codes(ctr, existing_cds)
     all_risks = risks + extra_risks
+    _t1 = _t.time()
 
     all_risk_cds = [r.risk_cd for r in all_risks]
     mortality = loader.load_mortality_rates(all_risks, ctr)
     beprd = loader.load_beprd(ctr, all_risk_cds)
     invld = loader.load_invld_months(ctr)
+    _t2 = _t.time()
+
     rsk_rt = compute_rsk_rt(ctr, all_risks, mortality, beprd, invld, n_steps)
+    _t3 = _t.time()
 
     lapse_paying, lapse_paidup = loader.load_lapse_rates(ctr)
     skew = loader.load_skew(ctr)
+    _t4 = _t.time()
+
     lapse_rt = compute_lapse_rt(ctr, lapse_paying, lapse_paidup, skew, n_steps)
+    _t5 = _t.time()
 
     qx_rates = {cd: cols["INVLD_TRMNAT_AF_APLY_RSK_RT"] for cd, cols in rsk_rt.items()}
     wx_monthly = lapse_rt["APLY_TRMNAT_RT"]
     tbl_mn = compute_tbl_mn(ctr, all_risks, qx_rates, wx_monthly, exit_flags, n_steps)
+    _t6 = _t.time()
+
+    if mn_timings is not None:
+        mn_timings["mn_load_risk"] = mn_timings.get("mn_load_risk", 0) + (_t1 - _t0)
+        mn_timings["mn_load_mort"] = mn_timings.get("mn_load_mort", 0) + (_t2 - _t1)
+        mn_timings["mn_calc_rsk"] = mn_timings.get("mn_calc_rsk", 0) + (_t3 - _t2)
+        mn_timings["mn_load_lapse"] = mn_timings.get("mn_load_lapse", 0) + (_t4 - _t3)
+        mn_timings["mn_calc_lapse"] = mn_timings.get("mn_calc_lapse", 0) + (_t5 - _t4)
+        mn_timings["mn_calc_tblmn"] = mn_timings.get("mn_calc_tblmn", 0) + (_t6 - _t5)
 
     return rsk_rt, lapse_rt, tbl_mn
 
