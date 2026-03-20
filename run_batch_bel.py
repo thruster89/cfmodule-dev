@@ -37,6 +37,9 @@ from cf_module.run import (
     compute_n_steps, _compute_mn_chain,
     _compute_trad_pv_single, _compute_bn_single, _compute_exp_single,
 )
+from cf_module.utils.logger import enable_file_logging, get_logger
+
+batch_logger = get_logger("batch")
 
 
 # ---------------------------------------------------------------------------
@@ -174,16 +177,20 @@ def _compute_one(ctx: PipelineContext, idno: int, timings=None):
 
 
 def _print_timings(timings, label=""):
-    """단계별 누적 타이밍 출력."""
+    """단계별 누적 타이밍 출력 (콘솔 + 로그 파일)."""
     n = timings.get("_count", 1)
     total = sum(v for k, v in timings.items() if k != "_count")
     prefix = f"  [{label}] " if label else "  "
-    print(f"{prefix}단계별 소요시간 ({n:,}건, 합계 {total:.2f}s):")
+    header = f"{prefix}단계별 소요시간 ({n:,}건, 합계 {total:.2f}s):"
+    print(header)
+    batch_logger.info(header.strip())
     for key in ["load_ctr", "mn_chain", "trad_pv", "tbl_bn", "exp", "cf_bel"]:
         v = timings.get(key, 0)
         pct = v / total * 100 if total > 0 else 0
         avg_ms = v / n * 1000 if n > 0 else 0
-        print(f"{prefix}  {key:>10s}: {v:7.2f}s ({pct:5.1f}%) avg {avg_ms:.2f}ms")
+        line = f"{prefix}  {key:>10s}: {v:7.2f}s ({pct:5.1f}%) avg {avg_ms:.2f}ms"
+        print(line)
+        batch_logger.info(line.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +334,7 @@ def _run_single_process(con, flat_list, loader, exp_cache, dc_curve,
     print(f"  [단일프로세스]  cache_load: {cache_total:.2f}s  db_flush: {flush_total:.2f}s")
     if err_summary:
         print(f"  [단일프로세스] 에러 요약: {err_summary}")
+        batch_logger.warning("에러 요약: %s", err_summary)
 
     return ok, err
 
@@ -494,6 +502,10 @@ def main():
         print("  멀티프로세스는 청크별 캐시를 자동 사용합니다.")
         return 1
 
+    # 로그 파일 활성화 (실행 단위)
+    log_path = enable_file_logging(log_dir="logs", prefix="cf_batch")
+    print(f"  로그 파일: {log_path}")
+
     con = duckdb.connect(args.db, read_only=True)
 
     # 출력 DB
@@ -511,10 +523,12 @@ def main():
     started_at = datetime.now()
 
     # 대상: flat (idno, prod, cov) 리스트
+    # CTR_POLNO 순 정렬: 같은 증권번호 그룹이 같은 청크에 모이도록
+    # → mn_cache 히트율 향상 (그룹 내 타 IDNO의 MN 중복계산 방지)
     rows = con.execute("""
         SELECT INFRC_IDNO, PROD_CD, COV_CD
         FROM II_INFRC WHERE INFRC_SEQ = 1
-        ORDER BY INFRC_IDNO
+        ORDER BY CTR_POLNO, INFRC_IDNO
     """).fetchall()
 
     flat_list = [(idno, prod, cov) for idno, prod, cov in rows]
@@ -526,10 +540,12 @@ def main():
     total_target = len(flat_list)
     mode_str = f"병렬 {n_workers}워커" if n_workers > 1 else "단일프로세스"
 
+    header = (f"OP_BEL 배치 산출  RUN_ID={run_id}  [{mode_str}]  "
+              f"대상={total_target:,}건  청크={args.chunk}건")
     print(f"{'='*60}")
-    print(f"  OP_BEL 배치 산출  RUN_ID={run_id}  [{mode_str}]")
-    print(f"  대상: {total_target:,}건  청크: {args.chunk}건")
+    print(f"  {header}")
     print(f"{'='*60}")
+    batch_logger.info("=== 배치 시작 === %s", header)
 
     # RUN_LOG 시작 기록
     out_con.execute(
@@ -584,6 +600,9 @@ def main():
     total_rows = out_con.execute(
         "SELECT COUNT(*) FROM OP_BEL WHERE RUN_ID = ?", [run_id]).fetchone()[0]
     rate = ok / total_time if total_time > 0 else 0
+    summary = (f"RUN_ID={run_id} {mode_str} "
+               f"OK={ok:,}/{total_target:,} ERR={err} "
+               f"{total_time:.1f}s ({rate:.0f}건/s)")
     print(f"\n{'='*60}")
     print(f"  OP_BEL 배치 산출 완료  RUN_ID={run_id}")
     print(f"{'='*60}")
@@ -592,6 +611,8 @@ def main():
     print(f"  출력: {args.output} ({total_rows:,}행)")
     print(f"  소요: {total_time:.1f}s ({rate:.0f}건/s)")
     print(f"{'='*60}")
+    batch_logger.info("=== 배치 완료 === %s", summary)
+    batch_logger.info("로그 저장: %s", log_path)
 
     out_con.close()
     con.close()
