@@ -166,17 +166,13 @@ class RawAssumptionLoader:
     # 배치 전건 프리로드 (mn_chain DB I/O 제거)
     # ------------------------------------------------------------------
     def preload_data_tables(self):
-        """배치 실행 시 데이터 테이블을 메모리에 일괄 로드.
-
-        원시 데이터를 메모리에 올린 후, load_* 함수에서 SQL 대신
-        인메모리 필터링 → _data_cache 자동 캐시.
-
-        전략: 키 매칭이 아니라 원시 데이터 보관 + 인메모리 필터.
-        """
+        """배치 실행 시 데이터 테이블을 메모리에 일괄 로드."""
+        import sys
         import time
         t0 = time.time()
 
         # IR_RSKRT_VAL: RSK_RT_CD별로 그룹화
+        print("    MORT (IR_RSKRT_VAL) 로드 중...", end="", flush=True)
         rows = self.conn.execute(f"""
             SELECT RSK_RT_CD, AGE, RSK_RT,
                    RSK_RT_DIV_VAL1, RSK_RT_DIV_VAL2, RSK_RT_DIV_VAL3,
@@ -185,25 +181,34 @@ class RawAssumptionLoader:
                    RSK_RT_DIV_VAL10
             FROM {self.p}IR_RSKRT_VAL
         """).fetchall()
-        self._mort_preload = {}  # {rsk_cd: [(age, rate, dv1..dv10), ...]}
+        self._mort_preload = {}
         for r in rows:
             self._mort_preload.setdefault(str(r[0]), []).append(r)
         t1 = time.time()
+        print(f" {len(rows):,}행 {t1-t0:.1f}s", flush=True)
 
         # IA_T_TRMNAT_RT: 전건 DataFrame
+        print("    LAPSE (IA_T_TRMNAT_RT) 로드 중...", end="", flush=True)
         self._lapse_preload = self.conn.execute(
             f"SELECT * FROM {self.p}IA_T_TRMNAT_RT").fetchdf()
         t2 = time.time()
+        print(f" {len(self._lapse_preload):,}행 {t2-t1:.1f}s", flush=True)
 
         # IA_R_BEPRD_DEFRY_RT: 전건 DataFrame
+        print("    BEPRD (IA_R_BEPRD_DEFRY_RT) 로드 중...", end="", flush=True)
         self._beprd_preload = self.conn.execute(
             f"SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT").fetchdf()
         t3 = time.time()
+        print(f" {len(self._beprd_preload):,}행 {t3-t2:.1f}s", flush=True)
 
         # IA_T_SKEW: 전건 DataFrame
+        print("    SKEW (IA_T_SKEW) 로드 중...", end="", flush=True)
         self._skew_preload = self.conn.execute(
             f"SELECT * FROM {self.p}IA_T_SKEW").fetchdf()
         t4 = time.time()
+        print(f" {len(self._skew_preload):,}행 {t4-t3:.1f}s", flush=True)
+
+        print(f"  데이터 프리로드 합계: {t4-t0:.1f}s", flush=True)
 
         print(f"  데이터 프리로드: MORT={t1-t0:.1f}s({len(rows):,}행) "
               f"LAPSE={t2-t1:.1f}s({len(self._lapse_preload):,}행) "
