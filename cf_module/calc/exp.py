@@ -53,77 +53,84 @@ def compute_exp(
     """
     results = []
 
+    # 공통 벡터 사전 계산
+    steps = np.arange(n_steps)
+    t_arr = elapsed_mm + steps  # CTR_AFT_PASS_MMCNT
+
+    # 물가상승 벡터 (step >= 2일 때 적용)
+    if cache.monthly_esc > 1.0:
+        esc_arr = np.where(steps >= 2, cache.monthly_esc ** (steps - 1), 1.0)
+    else:
+        esc_arr = None
+
     for tpcd, kdcd, item in exp_items:
-        vals = np.zeros(n_steps, dtype=np.float64)
         drvr = item["drvr"]
         prce = item.get("prce", 0)
-
-        # D_IND: DC_BF_AF_DVCD=1 → direct(1), DC_BF_AF_DVCD=0 → indirect(0)
         d_ind = item.get("dc", 1)
-
-        # ACQS: step=0 (첫 프로젝션 월) 제외
-        start_step = 1 if tpcd == "ACQS" else 0
         pay_dvcd = item.get("pay", 0)
 
-        for step in range(start_step, n_steps):
-            t = elapsed_mm + step  # CTR_AFT_PASS_MMCNT
+        # --- 마스크 구성 (유효 스텝) ---
+        mask = np.ones(n_steps, dtype=bool)
 
-            # PAY_MTNPSN_DVCD=0 (ACQS/MNT): pterm까지만 적용
-            if pay_dvcd == 0 and tpcd != "LSVY" and t > pterm_mm:
-                continue
+        # ACQS: step=0 제외
+        if tpcd == "ACQS":
+            mask[0] = False
 
-            # 시간 제약: ACQS EPRD
-            if tpcd == "ACQS":
-                eprd = item.get("eprd", EXP_DEFAULT_EPRD)
-                if t >= eprd:
-                    continue
+        # PAY_MTNPSN_DVCD=0: pterm까지만
+        if pay_dvcd == 0 and tpcd != "LSVY":
+            mask &= (t_arr <= pterm_mm)
 
-            # 시간 제약: MNT EYM
-            if tpcd == "MNT" and item.get("eym_yn", 0) == 1:
-                eym = item.get("eym", EXP_DEFAULT_EYM)
-                yyyymm = _t_to_yyyymm(base_yyyymm, step)
-                if yyyymm > eym:
-                    continue
+        # ACQS EPRD 제약
+        if tpcd == "ACQS":
+            eprd = item.get("eprd", EXP_DEFAULT_EPRD)
+            mask &= (t_arr < eprd)
 
-            # rate 인덱싱: [t] (1-based → 0-based), 초과 시 마지막 값 연장
-            rates = item.get("rates")
-            if rates is not None:
-                max_idx = len(rates)
-                rate_idx = t - 1  # t는 1-based → 0-based
-                if rate_idx < 0:
-                    rate = 0.0
-                elif rate_idx >= max_idx:
-                    rate = rates[-1]  # 마지막 값 연장
-                else:
-                    rate = rates[rate_idx]
-            else:
-                rate = item.get("rate", 0.0)
+        # MNT EYM 제약
+        if tpcd == "MNT" and item.get("eym_yn", 0) == 1:
+            eym = item.get("eym", EXP_DEFAULT_EYM)
+            # yyyymm 벡터 계산
+            base_y = base_yyyymm // 100
+            base_m = base_yyyymm % 100
+            total_m = base_m + steps
+            yyyymm_arr = (base_y + (total_m - 1) // 12) * 100 + (total_m - 1) % 12 + 1
+            mask &= (yyyymm_arr <= eym)
 
-            # 기초금액 계산 (드라이버별 공식)
-            if drvr == ExpDrvr.GPREM_RATE:
-                base_val = rate * gprem
-            elif drvr == ExpDrvr.FIXED_AMOUNT:
-                base_val = rate  # 절대금액
-            elif drvr == ExpDrvr.FIXED_VALUE:
-                base_val = item.get("rate", 0.0)  # LSVY 고정값
-            elif drvr == ExpDrvr.LOAN_RATE:
-                lv = loan_remamt[step] if loan_remamt is not None and step < len(loan_remamt) else 0
-                base_val = rate * lv
-            elif drvr == ExpDrvr.CNCTTP_RATE:
-                kv = cncttp_kics[step] if cncttp_kics is not None and step < len(cncttp_kics) else 0
-                base_val = rate * kv
-            elif drvr == ExpDrvr.CNCTTP_MINUS_LOAN:
-                kv = cncttp_kics[step] if cncttp_kics is not None and step < len(cncttp_kics) else 0
-                lv = loan_remamt[step] if loan_remamt is not None and step < len(loan_remamt) else 0
-                base_val = rate * (kv - lv)
-            else:
-                base_val = rate * gprem  # fallback (미정의 드라이버)
+        # --- rate 벡터 구성 ---
+        rates = item.get("rates")
+        if rates is not None:
+            rate_idx = np.clip(t_arr - 1, 0, len(rates) - 1)  # 0-based, 초과 시 마지막 값
+            rate_arr = rates[rate_idx]
+            # t_arr=0 → rate_idx=-1 → clip 0으로 처리됨 (원본에서는 rate=0)
+            rate_arr = np.where(t_arr >= 1, rate_arr, 0.0)
+        else:
+            rate_arr = np.full(n_steps, item.get("rate", 0.0))
 
-            # 물가상승 보정 (PRCE_ASC_RT_APLY_YN=1)
-            if prce == 1 and cache.monthly_esc > 1.0 and step >= 2:
-                base_val *= cache.monthly_esc ** (step - 1)
+        # --- 드라이버별 기초금액 (벡터) ---
+        if drvr == ExpDrvr.GPREM_RATE:
+            vals = rate_arr * gprem
+        elif drvr == ExpDrvr.FIXED_AMOUNT:
+            vals = rate_arr.copy()
+        elif drvr == ExpDrvr.FIXED_VALUE:
+            vals = np.full(n_steps, item.get("rate", 0.0))
+        elif drvr == ExpDrvr.LOAN_RATE:
+            lv = loan_remamt if loan_remamt is not None else np.zeros(n_steps)
+            vals = rate_arr * lv[:n_steps]
+        elif drvr == ExpDrvr.CNCTTP_RATE:
+            kv = cncttp_kics if cncttp_kics is not None else np.zeros(n_steps)
+            vals = rate_arr * kv[:n_steps]
+        elif drvr == ExpDrvr.CNCTTP_MINUS_LOAN:
+            kv = cncttp_kics if cncttp_kics is not None else np.zeros(n_steps)
+            lv = loan_remamt if loan_remamt is not None else np.zeros(n_steps)
+            vals = rate_arr * (kv[:n_steps] - lv[:n_steps])
+        else:
+            vals = rate_arr * gprem  # fallback
 
-            vals[step] = base_val
+        # 물가상승 보정
+        if prce == 1 and esc_arr is not None:
+            vals = vals * esc_arr
+
+        # 마스크 적용
+        vals = vals * mask
 
         results.append(ExpResult(
             tpcd=tpcd, kdcd=kdcd, d_ind=d_ind, values=vals,

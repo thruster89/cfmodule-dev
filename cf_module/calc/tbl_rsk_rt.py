@@ -19,6 +19,8 @@ def compute_rsk_rt(
     beprd: Dict[str, np.ndarray],
     invld_months: Dict[str, int],
     n_steps: int,
+    *,
+    fast: bool = False,
 ) -> Dict[str, dict]:
     """계약 1건의 OD_RSK_RT 산출.
 
@@ -29,6 +31,7 @@ def compute_rsk_rt(
         beprd: {rsk_cd: beprd_by_year}
         invld_months: {rsk_cd: 면책기간(월)}
         n_steps: 프로젝션 스텝 수
+        fast: True이면 AF 배열만 반환 (배치 최적화)
 
     Returns:
         {rsk_cd: {column_name: ndarray}}
@@ -55,7 +58,7 @@ def compute_rsk_rt(
                 clipped_ages = np.clip(ages.astype(np.int32), 0, len(rate_arr) - 1)
                 rsk_rt = rate_arr[clipped_ages]
 
-        # 고정 계수들
+        # 고정 계수들 (현재 1.0 — 향후 trd_coef 등 확장 가능)
         loss_rt = np.ones(n_steps, dtype=np.float64)
         mth_efect = np.ones(n_steps, dtype=np.float64)
         trd_coef = np.ones(n_steps, dtype=np.float64)
@@ -83,16 +86,19 @@ def compute_rsk_rt(
         if invld_mm > 0:
             af[duration_months < invld_mm] = 0.0
 
-        results[rsk_cd] = {
-            "RSK_RT": rsk_rt,
-            "LOSS_RT": loss_rt,
-            "MTH_EFECT_COEF": mth_efect,
-            "BEPRD_DEFRY_RT": beprd_rt,
-            "TRD_COEF": trd_coef,
-            "ARVL_AGE_COEF": arvl_age,
-            "INVLD_TRMNAT_BF_YR_RSK_RT": bf_yr,
-            "INVLD_TRMNAT_BF_MM_RSK_RT": bf_mm,
-            "INVLD_TRMNAT_AF_APLY_RSK_RT": af,
-        }
+        if fast:
+            results[rsk_cd] = {"INVLD_TRMNAT_AF_APLY_RSK_RT": af}
+        else:
+            results[rsk_cd] = {
+                "RSK_RT": rsk_rt,
+                "LOSS_RT": loss_rt,
+                "MTH_EFECT_COEF": mth_efect,
+                "BEPRD_DEFRY_RT": beprd_rt,
+                "TRD_COEF": trd_coef,
+                "ARVL_AGE_COEF": arvl_age,
+                "INVLD_TRMNAT_BF_YR_RSK_RT": bf_yr,
+                "INVLD_TRMNAT_BF_MM_RSK_RT": bf_mm,
+                "INVLD_TRMNAT_AF_APLY_RSK_RT": af,
+            }
 
     return results
