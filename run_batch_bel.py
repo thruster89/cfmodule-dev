@@ -358,6 +358,7 @@ def _worker_process(task):
     loader = RawAssumptionLoader(con)
     all_ids = _chunk_idnos(worker_items)
     loader.preload_contracts(idnos=all_ids)
+    loader.preload_data_tables()
     exp_cache = ExpDataCache(con)
     polno_map = _build_polno_map(con)
 
@@ -561,6 +562,7 @@ def main():
         t0 = time.time()
         loader = RawAssumptionLoader(con)
         loader.preload_contracts()
+        loader.preload_data_tables()
         exp_cache = ExpDataCache(con)
 
         dc_curve_rows = con.execute(
