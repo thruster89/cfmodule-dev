@@ -108,29 +108,28 @@ def _bn_dedup(
     if n_exit == 0:
         return r
 
-    # C행렬
+    # C행렬 — 벡터화 구성
     C = np.ones((n_rates, n_rates), dtype=np.float64)
     np.fill_diagonal(C, 0.0)
+
+    # exit_cds에 대한 meta를 한번에 추출
+    _metas = [risk_meta.get(cd, {}) for cd in exit_cds]
 
     # 동일그룹 = 0
     groups = np.empty(n_rates, dtype=object)
     groups[0] = "__wx__"
-    for k, cd in enumerate(exit_cds):
-        groups[k + 1] = risk_meta.get(cd, {}).get("grp", f"__{cd}__")
+    for k, m in enumerate(_metas):
+        groups[k + 1] = m.get("grp", f"__{exit_cds[k]}__")
     same_grp = groups[:, None] == groups[None, :]
     np.fill_diagonal(same_grp, False)
     C[same_grp] = 0.0
 
-    # 사망위험(dead=0) 열 = 0
-    death = np.zeros(n_rates, dtype=bool)
+    # 사망위험(dead=0) 열 = 0 + RSKRT-only 열 = 0 (통합)
+    col_zero = np.zeros(n_rates, dtype=bool)
     for k, cd in enumerate(exit_cds):
-        death[k + 1] = (risk_meta.get(cd, {}).get("dead", 1) == 0)
-    C[:, death] = 0.0
-
-    # RSKRT-only: 열 = 0 (다른 risk의 dedup에 영향 안 줌)
-    for k, cd in enumerate(exit_cds):
-        if cd in rskrt_only_cds:
-            C[:, k + 1] = 0.0
+        if _metas[k].get("dead", 1) == 0 or cd in rskrt_only_cds:
+            col_zero[k + 1] = True
+    C[:, col_zero] = 0.0
 
     # dedup: q'i = qi × (1 - Σj(qj × Cij) / 2)
     adj = (r.T @ C.T).T / 2.0
@@ -209,47 +208,56 @@ def compute_bn(
             if cd in rskrt_cds:
                 bnft_rskrt += r_dedup[i + 1]
 
-        # 부담보 적용
-        trmnat = np.where(in_coverage, trmnat, 0.0)
-        rsvamt_drpo = np.where(in_coverage, rsvamt_drpo, 0.0)
-        bnft_drpo = np.where(in_coverage, bnft_drpo, 0.0)
-        bnft_rskrt = np.where(in_coverage, bnft_rskrt, 0.0)
+        # 부담보 적용 (in-place 마스킹)
+        ncov_mask = in_coverage.astype(np.float64)
+        trmnat = trmnat * ncov_mask
+        rsvamt_drpo = rsvamt_drpo * ncov_mask
+        bnft_drpo = bnft_drpo * ncov_mask
+        bnft_rskrt = bnft_rskrt * ncov_mask
 
-        # exit rate & tpx
+        # exit rate & tpx — 벡터화
         bn_exit = np.clip(trmnat + rsvamt_drpo + bnft_drpo, 0, 1)
 
-        trmo = np.ones(n_steps, dtype=np.float64)
-        trme = np.ones(n_steps, dtype=np.float64)
-        trmpsn = np.zeros(n_steps, dtype=np.float64)
-        rsvamt_drpsn = np.zeros(n_steps, dtype=np.float64)
-        defry_drpsn = np.zeros(n_steps, dtype=np.float64)
-        bnft_ocurpe = np.zeros(n_steps, dtype=np.float64)
+        # trme[0]=1.0 (초기값), trme[t]=prod(1-exit[1..t]) for t>=1
+        survive = 1.0 - bn_exit
+        trme = np.empty(n_steps, dtype=np.float64)
+        trme[0] = 1.0
+        if n_steps > 1:
+            trme[1:] = np.cumprod(survive[1:])
+        trmo = np.empty(n_steps, dtype=np.float64)
+        trmo[0] = 1.0
+        if n_steps > 1:
+            trmo[1:] = trme[:-1]
 
-        # t=0: TRMO=1, TRME=1, counts=0
-        for t in range(1, n_steps):
-            trmo[t] = trme[t - 1]
-            trme[t] = trmo[t] * (1.0 - bn_exit[t])
-            trmpsn[t] = trmo[t] * trmnat[t]
-            rsvamt_drpsn[t] = trmo[t] * bnft_drpo[t]    # BN: RSVAMT_DEFRY_DRPSN = TRMO x BNFT_DRPO
-            defry_drpsn[t] = trmo[t] * rsvamt_drpo[t]    # BN: DEFRY_DRPSN = TRMO x RSVAMT_DRPO
-            bnft_ocurpe[t] = trmo[t] * bnft_rskrt[t]
+        # 각 drpsn은 trmo × rate (벡터 곱)
+        trmpsn = trmo * trmnat
+        trmpsn[0] = 0.0
+        rsvamt_drpsn = trmo * bnft_drpo    # BN: RSVAMT_DEFRY_DRPSN = TRMO x BNFT_DRPO
+        rsvamt_drpsn[0] = 0.0
+        defry_drpsn = trmo * rsvamt_drpo    # BN: DEFRY_DRPSN = TRMO x RSVAMT_DRPO
+        defry_drpsn[0] = 0.0
+        bnft_ocurpe = trmo * bnft_rskrt
+        bnft_ocurpe[0] = 0.0
 
         # CRIT_AMT
         crit_amt_arr = np.full(n_steps, join_amt, dtype=np.float64)
 
-        # DEFRY_RT
+        # DEFRY_RT — unique duration만 조회 후 매핑
         defry_rt_arr = np.ones(n_steps, dtype=np.float64)
         if get_defry_rate_fn:
-            for t in range(n_steps):
-                defry_rt_arr[t] = get_defry_rate_fn(bnft_no, int(duration_years[t]))
+            uniq_dur = np.unique(duration_years)
+            dur_to_defry = {int(d): get_defry_rate_fn(bnft_no, int(d)) for d in uniq_dur}
+            for d, v in dur_to_defry.items():
+                defry_rt_arr[duration_years == d] = v
 
-        # PRTT_RT
+        # PRTT_RT — unique duration만 조회 후 매핑
         prtt_rt_arr = np.zeros(n_steps, dtype=np.float64)
         has_prtt = False
         if get_prtt_rate_fn:
-            for t in range(n_steps):
-                v = get_prtt_rate_fn(bnft_no, int(duration_years[t]))
-                prtt_rt_arr[t] = v
+            uniq_dur = np.unique(duration_years)
+            dur_to_prtt = {int(d): get_prtt_rate_fn(bnft_no, int(d)) for d in uniq_dur}
+            for d, v in dur_to_prtt.items():
+                prtt_rt_arr[duration_years == d] = v
                 if v != 0:
                     has_prtt = True
 
