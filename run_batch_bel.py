@@ -520,10 +520,11 @@ def main():
     args = parser.parse_args()
 
     # 워커 수 결정
+    MAX_WORKERS = 8
     n_workers = args.workers
     if n_workers is None:
-        n_workers = max(1, mp.cpu_count() - 1)
-    n_workers = max(1, n_workers)
+        n_workers = min(MAX_WORKERS, max(1, mp.cpu_count() - 1))
+    n_workers = max(1, min(n_workers, MAX_WORKERS))
 
     # --preload는 단일프로세스 전용
     if args.preload and n_workers > 1:
