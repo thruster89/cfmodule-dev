@@ -576,8 +576,6 @@ def main():
         ok, err = _run_single_process(
             con, flat_list, loader, exp_cache, dc_curve,
             args.preload, args.chunk, run_id, out_con, polno_map=polno_map)
-        print("  프리로드 히트율:")
-        loader.print_preload_stats()
     else:
         # 멀티프로세스 모드
         dc_curve_rows = con.execute(
