@@ -91,6 +91,11 @@ class RawAssumptionLoader:
         self._data_cache = {}     # (table, where_clause) -> result
         self._contract_cache = {} # idno -> ContractInfo
         self._cov_def_cd_map = {} # (prod, cls, cov) -> {def_cd_value: rsk_div_index}
+        # 배치 프리로드 (preload_data_tables() 호출 시 채워짐)
+        self._mort_preload = None    # {(rsk_cd, div_val_tuple): rate_array}
+        self._lapse_preload = None   # {filter_tuple: (paying, paidup)}
+        self._beprd_preload = None   # {(filter_tuple, rsk_cat_val): beprd_array}
+        self._skew_preload = None    # {filter_tuple: skew_array}
         self._preload_driver_tables()
         self._preload_cov_def_cd()
 
@@ -156,6 +161,186 @@ class RawAssumptionLoader:
         for row in rows:
             ctr = self._row_to_contract(row)
             self._contract_cache[ctr.idno] = ctr
+
+    # ------------------------------------------------------------------
+    # 배치 전건 프리로드 (mn_chain DB I/O 제거)
+    # ------------------------------------------------------------------
+    def preload_data_tables(self):
+        """배치 실행 시 3대 데이터 테이블을 메모리에 일괄 로드.
+
+        이후 load_mortality_rates/load_lapse_rates/load_beprd/load_skew에서
+        SQL 대신 인메모리 lookup으로 대체.
+        """
+        import time
+        t0 = time.time()
+        self._preload_mortality()
+        t1 = time.time()
+        self._preload_lapse()
+        t2 = time.time()
+        self._preload_beprd()
+        t3 = time.time()
+        self._preload_skew()
+        t4 = time.time()
+        print(f"  데이터 프리로드: MORT={t1-t0:.1f}s LAPSE={t2-t1:.1f}s "
+              f"BEPRD={t3-t2:.1f}s SKEW={t4-t3:.1f}s (합계 {t4-t0:.1f}s)")
+        print(f"    MORT={len(self._mort_preload):,}건 "
+              f"LAPSE={len(self._lapse_preload):,}건 "
+              f"BEPRD={len(self._beprd_preload):,}건 "
+              f"SKEW={len(self._skew_preload):,}건")
+
+    def _preload_mortality(self):
+        """IR_RSKRT_VAL 전건 → _mort_preload.
+
+        키: (rsk_cd, (div_val1, div_val2, ..., div_val10))
+        값: rate_by_age (numpy array, 인덱스=나이)
+        """
+        div_cols = [f"RSK_RT_DIV_VAL{i}" for i in range(1, 11)]
+        df = self.conn.execute(f"""
+            SELECT RSK_RT_CD, AGE, RSK_RT, {', '.join(div_cols)}
+            FROM {self.p}IR_RSKRT_VAL
+        """).fetchdf()
+
+        self._mort_preload = {}
+        if df.empty:
+            return
+
+        # 그룹화: (RSK_RT_CD, DIV_VAL1..10) → ages/rates
+        group_cols = ["RSK_RT_CD"] + div_cols
+        for key_vals, sub in df.groupby(group_cols, sort=False):
+            rsk_cd = str(key_vals[0])
+            div_vals = tuple(str(v) if pd.notna(v) else "" for v in key_vals[1:])
+
+            ages = sub["AGE"].values.astype(int)
+            vals = sub["RSK_RT"].values.astype(np.float64)
+
+            if len(ages) == 0:
+                continue
+            max_age = int(ages.max())
+            arr = np.zeros(max_age + 1, dtype=np.float64)
+            arr[ages] = vals
+            self._mort_preload[(rsk_cd, div_vals)] = arr
+
+    def _preload_lapse(self):
+        """IA_T_TRMNAT_RT 전건 → _lapse_preload.
+
+        키: 행의 필터 컬럼 tuple
+        값: (paying_array, paidup_array)
+        """
+        df = self.conn.execute(f"""
+            SELECT * FROM {self.p}IA_T_TRMNAT_RT
+        """).fetchdf()
+
+        self._lapse_preload = {}
+        if df.empty:
+            return
+
+        # 필터 컬럼 = ASSM_FILE_ID, PROD_GRP_CD, ASSM_GRP_CD*
+        filter_cols = [c for c in df.columns
+                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
+        val_cols = sorted(
+            [c for c in df.columns if c.startswith("TRMNAT_RT") and c[9:].isdigit()],
+            key=lambda x: int(x[9:])
+        )
+        max_years = 100
+
+        # (filter_tuple) → {pay_dvcd: rate_array}
+        temp = {}
+        for _, row in df.iterrows():
+            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
+            pay_dvcd = int(row.get("PAY_DVCD", 1))
+            rates = np.zeros(max_years, dtype=np.float64)
+            for yr_idx, col in enumerate(val_cols):
+                if yr_idx < max_years:
+                    v = float(row[col]) if pd.notna(row[col]) else 0.0
+                    rates[yr_idx] = v
+            n_data = len(val_cols)
+            if n_data < max_years:
+                rates[n_data:] = rates[n_data - 1]
+            temp.setdefault(fkey, {})[pay_dvcd] = rates
+
+        for fkey, dvcd_map in temp.items():
+            paying = dvcd_map.get(1, np.zeros(max_years, dtype=np.float64))
+            paidup = dvcd_map.get(2, np.zeros(max_years, dtype=np.float64))
+            self._lapse_preload[fkey] = (paying, paidup)
+
+        # _lapse_filter_cols 저장 (lookup 시 사용)
+        self._lapse_filter_cols = filter_cols
+
+    def _preload_beprd(self):
+        """IA_R_BEPRD_DEFRY_RT 전건 → _beprd_preload.
+
+        키: (filter_tuple, rsk_cat_val)
+        값: beprd_array
+        """
+        df = self.conn.execute(f"""
+            SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT
+        """).fetchdf()
+
+        self._beprd_preload = {}
+        if df.empty:
+            return
+
+        filter_cols = [c for c in df.columns
+                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
+        val_cols = sorted(
+            [c for c in df.columns if c.startswith("BEPRD_DEFRY_RT")],
+            key=lambda x: int(x.replace("BEPRD_DEFRY_RT", ""))
+        )
+        max_years = 100
+
+        for _, row in df.iterrows():
+            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
+            rsk_cat_val = str(row.get("RSK_CAT_VAL", "")) if pd.notna(row.get("RSK_CAT_VAL")) else ""
+
+            beprd = np.ones(max_years, dtype=np.float64)
+            for yr_idx, col in enumerate(val_cols):
+                if yr_idx < max_years:
+                    v = float(row[col]) if pd.notna(row[col]) else 1.0
+                    beprd[yr_idx] = v
+            # 마지막 유효값 연장
+            last_valid = 0
+            for i in range(max_years):
+                if beprd[i] != 1.0:
+                    last_valid = i
+            if last_valid > 0 and last_valid < max_years - 1:
+                beprd[last_valid + 1:] = beprd[last_valid]
+
+            self._beprd_preload[(fkey, rsk_cat_val)] = beprd
+
+        self._beprd_filter_cols = filter_cols
+
+    def _preload_skew(self):
+        """IA_T_SKEW 전건 → _skew_preload.
+
+        키: filter_tuple
+        값: skew_array (max_months)
+        """
+        df = self.conn.execute(f"""
+            SELECT * FROM {self.p}IA_T_SKEW
+        """).fetchdf()
+
+        self._skew_preload = {}
+        if df.empty:
+            return
+
+        filter_cols = [c for c in df.columns
+                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
+        max_months = 1200
+
+        for _, row in df.iterrows():
+            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
+            skew = np.full(max_months, 1.0 / 12.0, dtype=np.float64)
+            for mi in range(36):
+                col = f"SKEW{mi + 1}"
+                if col in df.columns:
+                    v = float(row[col]) if pd.notna(row[col]) else 1.0 / 12.0
+                    skew[mi] = v
+            # 37개월 이후 = 마지막 값 유지
+            if len(df.columns) > 0:
+                skew[36:] = skew[35]
+            self._skew_preload[fkey] = skew
+
+        self._skew_filter_cols = filter_cols
 
     def _row_to_contract(self, row) -> ContractInfo:
         main_pterm = int(row[11]) if row[11] is not None else int(row[6])
@@ -277,17 +462,31 @@ class RawAssumptionLoader:
         rates = {}
         for risk in risks:
             rsk_cd = risk.risk_cd
-            # DEF_CD 매핑으로 WHERE 조건 구축
+
+            # DEF_CD 매핑으로 DIV_VAL 결정
+            div_vals_list = [""] * 10  # 10개 위치 기본값
             div_filters = []
             for pos_idx in range(10):
                 def_cd = risk.def_cds[pos_idx] if risk.def_cds else None
                 if def_cd and def_cd in def_cd_map:
                     ctr_idx = def_cd_map[def_cd]
                     ctr_val = ctr.rsk_divs[ctr_idx] if ctr_idx < len(ctr.rsk_divs) else "^"
+                    div_vals_list[pos_idx] = ctr_val
                     div_filters.append(
                         f"RSK_RT_DIV_VAL{pos_idx + 1} = '{ctr_val}'"
                     )
 
+            # 프리로드 모드: dict lookup
+            if self._mort_preload is not None:
+                div_key = tuple(div_vals_list)
+                arr = self._mort_preload.get((rsk_cd, div_key))
+                if arr is not None:
+                    rates[rsk_cd] = arr[:1] if risk.chr_cd == "S" else arr
+                else:
+                    rates[rsk_cd] = np.zeros(1, dtype=np.float64)
+                continue
+
+            # SQL 모드: 기존 캐시 + DB 조회
             div_where = " AND " + " AND ".join(div_filters) if div_filters else ""
             cache_key = ("MORT", rsk_cd, div_where)
             if cache_key in self._data_cache:
@@ -442,6 +641,22 @@ class RawAssumptionLoader:
             parts.append(f"{col} = '{val}'")
         return " AND ".join(parts)
 
+    def _resolved_to_filter_key(self, resolved: dict, filter_cols: list) -> tuple:
+        """resolved dict → 프리로드 키 변환.
+
+        프리로드 시 filter_cols 순서로 행의 값을 tuple로 만들었으므로,
+        같은 순서로 resolved의 값을 추출한다.
+        """
+        vals = []
+        for col in filter_cols:
+            if col == "ASSM_FILE_ID":
+                vals.append(str(resolved["file_id"]))
+            elif col == "PROD_GRP_CD":
+                vals.append(str(resolved["prod_grp"]))
+            else:
+                vals.append(str(resolved["grp_filters"].get(col, "")))
+        return tuple(vals)
+
     # ------------------------------------------------------------------
     # 해지율 (IA_T_TRMNAT_RT)
     # ------------------------------------------------------------------
@@ -456,6 +671,14 @@ class RawAssumptionLoader:
         """
         resolved = self._resolve_assm_filter(12, ctr)
         if resolved is None:
+            return np.zeros(max_years), np.zeros(max_years)
+
+        # 프리로드 모드
+        if self._lapse_preload is not None:
+            fkey = self._resolved_to_filter_key(resolved, self._lapse_filter_cols)
+            result = self._lapse_preload.get(fkey)
+            if result is not None:
+                return result
             return np.zeros(max_years), np.zeros(max_years)
 
         where = self._build_where(resolved)
@@ -511,6 +734,14 @@ class RawAssumptionLoader:
         if resolved is None:
             return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
 
+        # 프리로드 모드
+        if self._skew_preload is not None:
+            fkey = self._resolved_to_filter_key(resolved, self._skew_filter_cols)
+            result = self._skew_preload.get(fkey)
+            if result is not None:
+                return result
+            return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
+
         where = self._build_where(resolved)
         cache_key = ("SKEW", where)
         if cache_key in self._data_cache:
@@ -554,6 +785,19 @@ class RawAssumptionLoader:
         resolved = self._resolve_assm_filter(9, ctr)
         if resolved is None:
             return {rsk: np.ones(max_years) for rsk in risk_cds}
+
+        # 프리로드 모드
+        if self._beprd_preload is not None:
+            fkey = self._resolved_to_filter_key(resolved, self._beprd_filter_cols)
+            result = {}
+            for risk_cd in risk_cds:
+                rsk_cat_val = self._rsk_cat_cache.get((9, resolved["file_id"], risk_cd))
+                if rsk_cat_val is None:
+                    result[risk_cd] = np.ones(max_years, dtype=np.float64)
+                else:
+                    arr = self._beprd_preload.get((fkey, str(rsk_cat_val)))
+                    result[risk_cd] = arr if arr is not None else np.ones(max_years, dtype=np.float64)
+            return result
 
         result = {}
         for risk_cd in risk_cds:
