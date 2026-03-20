@@ -519,6 +519,12 @@ class RawAssumptionLoader:
         if not risks:
             return {}
 
+        # 계약수준 캐시: 동일 (prod, cls, cov, rsk_divs) → 동일 결과
+        ctr_key = ("MORT_CTR", ctr.prod_cd, ctr.cls_cd, ctr.cov_cd,
+                    tuple(ctr.rsk_divs))
+        if ctr_key in self._data_cache:
+            return self._data_cache[ctr_key]
+
         # IP_P_COV 기반 동적 DEF_CD 매핑
         def_cd_map = self._get_def_cd_map(ctr.prod_cd, ctr.cls_cd, ctr.cov_cd)
 
@@ -592,6 +598,7 @@ class RawAssumptionLoader:
 
             self._data_cache[cache_key] = rates[rsk_cd]
 
+        self._data_cache[ctr_key] = rates
         return rates
 
     # ------------------------------------------------------------------
@@ -727,6 +734,12 @@ class RawAssumptionLoader:
             paying: (max_years,) 납입중 연해지율 (index 0 = 1년차)
             paidup: (max_years,) 납입후 연해지율 (index 0 = 1년차)
         """
+        # 계약수준 캐시 (resolve/build_where 건너뜀)
+        ctr_key = ("LAPSE_CTR", ctr.prod_cd, ctr.cls_cd,
+                    tuple(ctr.assm_divs))
+        if ctr_key in self._data_cache:
+            return self._data_cache[ctr_key]
+
         resolved = self._resolve_assm_filter(12, ctr)
         if resolved is None:
             return np.zeros(max_years), np.zeros(max_years)
@@ -773,6 +786,7 @@ class RawAssumptionLoader:
                 arr[n_data:] = arr[n_data - 1]
 
         self._data_cache[cache_key] = (paying, paidup)
+        self._data_cache[ctr_key] = (paying, paidup)
         return paying, paidup
 
     # ------------------------------------------------------------------
@@ -786,6 +800,12 @@ class RawAssumptionLoader:
         Returns:
             skew: (max_months,) 스큐 지수 (index 0 = 1개월차)
         """
+        # 계약수준 캐시
+        ctr_key = ("SKEW_CTR", ctr.prod_cd, ctr.cls_cd,
+                    tuple(ctr.assm_divs))
+        if ctr_key in self._data_cache:
+            return self._data_cache[ctr_key]
+
         resolved = self._resolve_assm_filter(13, ctr)
         if resolved is None:
             return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
@@ -823,6 +843,7 @@ class RawAssumptionLoader:
                 skew[mm_idx] = v
 
         self._data_cache[cache_key] = skew
+        self._data_cache[ctr_key] = skew
         return skew
 
     # ------------------------------------------------------------------
@@ -836,6 +857,12 @@ class RawAssumptionLoader:
         Returns:
             {rsk_cd: beprd[year]} — index 0 = 1년차
         """
+        # 계약수준 캐시
+        ctr_key = ("BEPRD_CTR", ctr.prod_cd, ctr.cls_cd,
+                    tuple(ctr.assm_divs), tuple(risk_cds))
+        if ctr_key in self._data_cache:
+            return self._data_cache[ctr_key]
+
         resolved = self._resolve_assm_filter(9, ctr)
         if resolved is None:
             return {rsk: np.ones(max_years) for rsk in risk_cds}
@@ -861,6 +888,10 @@ class RawAssumptionLoader:
                 # 프리로드 모드: 사전 인덱싱 조회
                 if self._beprd_indexed:
                     sub = self._lookup_indexed(self._beprd_indexed, resolved)
+                    if isinstance(sub, pd.DataFrame) and not sub.empty and "RSK_CAT_VAL" in sub.columns:
+                        df = sub[sub["RSK_CAT_VAL"].astype(str) == str(rsk_cat_val)]
+                    else:
+                        df = sub
                 elif isinstance(self._beprd_preload, pd.DataFrame) and not self._beprd_preload.empty:
                     sub = self._filter_df_by_where(self._beprd_preload, resolved)
                     if "RSK_CAT_VAL" in sub.columns:
@@ -902,6 +933,7 @@ class RawAssumptionLoader:
             self._data_cache[cache_key] = beprd
             result[risk_cd] = beprd
 
+        self._data_cache[ctr_key] = result
         return result
 
     # ------------------------------------------------------------------
