@@ -92,10 +92,14 @@ class RawAssumptionLoader:
         self._contract_cache = {} # idno -> ContractInfo
         self._cov_def_cd_map = {} # (prod, cls, cov) -> {def_cd_value: rsk_div_index}
         # 배치 프리로드 (preload_data_tables() 호출 시 채워짐)
-        self._mort_preload = None    # {rsk_cd: [(row_tuple), ...]}
+        self._mort_preload = None    # None 체크용 (프리로드 여부)
+        self._mort_indexed = {}      # {(rsk_cd, div_key): [(age, rate), ...]}
         self._lapse_preload = None   # DataFrame or None
+        self._lapse_indexed = {}     # {composite_key: sub_DataFrame}
         self._beprd_preload = None   # DataFrame or None
+        self._beprd_indexed = {}     # {composite_key: sub_DataFrame}
         self._skew_preload = None    # DataFrame or None
+        self._skew_indexed = {}      # {composite_key: sub_DataFrame}
         self._risk_preload = None    # {(prod,cls,cov): [RiskInfo, ...]}
         self._cov_rskrt_preload = None  # {(prod,cls,cov): {rsk_cd: (rsvamt, pyexsp)}}
         self._bnft_rskrt_preload = None # {(prod,cls,cov): {rsk_cd: (bnft_drpo, min_rskrt_yn)}}
@@ -276,35 +280,47 @@ class RawAssumptionLoader:
                        RSK_RT_DIV_VAL10
                 FROM {self.p}IR_RSKRT_VAL
             """).fetchall()
-            self._mort_preload = {}
+            # (rsk_cd, div_val_tuple) → [(age, rate), ...] 사전 인덱싱
+            self._mort_preload = {}  # 하위호환 (None 체크용)
+            self._mort_indexed = {}
             for r in rows:
-                self._mort_preload.setdefault(str(r[0]), []).append(r)
+                rsk_cd = str(r[0])
+                div_key = tuple(str(r[3 + i]) if r[3 + i] is not None else ""
+                                for i in range(10))
+                self._mort_indexed.setdefault(
+                    (rsk_cd, div_key), []).append((int(r[1]), float(r[2])))
             t1 = time.time()
             print(f" {len(rows):,}행 {t1-t_chr:.1f}s", flush=True)
         else:
             print("    MORT (IR_RSKRT_VAL) 건너뜀 (멀티프로세스 모드)", flush=True)
             t1 = t_chr
 
-        # IA_T_TRMNAT_RT: 전건 DataFrame
+        # IA_T_TRMNAT_RT: dict 인덱싱
         print("    LAPSE (IA_T_TRMNAT_RT) 로드 중...", end="", flush=True)
-        self._lapse_preload = self.conn.execute(
+        _lapse_df = self.conn.execute(
             f"SELECT * FROM {self.p}IA_T_TRMNAT_RT").fetchdf()
+        self._lapse_preload = _lapse_df  # 하위호환 (isinstance 체크용)
+        self._lapse_indexed = self._index_df(_lapse_df)
         t2 = time.time()
-        print(f" {len(self._lapse_preload):,}행 {t2-t1:.1f}s", flush=True)
+        print(f" {len(_lapse_df):,}행 {t2-t1:.1f}s", flush=True)
 
-        # IA_R_BEPRD_DEFRY_RT: 전건 DataFrame
+        # IA_R_BEPRD_DEFRY_RT: dict 인덱싱
         print("    BEPRD (IA_R_BEPRD_DEFRY_RT) 로드 중...", end="", flush=True)
-        self._beprd_preload = self.conn.execute(
+        _beprd_df = self.conn.execute(
             f"SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT").fetchdf()
+        self._beprd_preload = _beprd_df
+        self._beprd_indexed = self._index_df(_beprd_df)
         t3 = time.time()
-        print(f" {len(self._beprd_preload):,}행 {t3-t2:.1f}s", flush=True)
+        print(f" {len(_beprd_df):,}행 {t3-t2:.1f}s", flush=True)
 
-        # IA_T_SKEW: 전건 DataFrame
+        # IA_T_SKEW: dict 인덱싱
         print("    SKEW (IA_T_SKEW) 로드 중...", end="", flush=True)
-        self._skew_preload = self.conn.execute(
+        _skew_df = self.conn.execute(
             f"SELECT * FROM {self.p}IA_T_SKEW").fetchdf()
+        self._skew_preload = _skew_df
+        self._skew_indexed = self._index_df(_skew_df)
         t4 = time.time()
-        print(f" {len(self._skew_preload):,}행 {t4-t3:.1f}s", flush=True)
+        print(f" {len(_skew_df):,}행 {t4-t3:.1f}s", flush=True)
 
         print(f"  데이터 프리로드 합계: {t4-t0:.1f}s", flush=True)
 
@@ -316,8 +332,60 @@ class RawAssumptionLoader:
               f"BEPRD={t3-t2:.1f}s SKEW={t4-t3:.1f}s "
               f"합계={t4-t0:.1f}s")
 
+    @staticmethod
+    def _index_df(df):
+        """DataFrame → {(file_id, prod_grp, grp_cd_tuple): sub_DataFrame} 사전 인덱싱.
+
+        ASSM_FILE_ID, PROD_GRP_CD, ASSM_GRP_CD* 컬럼 조합을 키로 그룹화.
+        """
+        if df is None or df.empty:
+            return {}
+        # 키 컬럼 추출
+        key_cols = []
+        if "ASSM_FILE_ID" in df.columns:
+            key_cols.append("ASSM_FILE_ID")
+        if "PROD_GRP_CD" in df.columns:
+            key_cols.append("PROD_GRP_CD")
+        grp_cols = sorted(c for c in df.columns if c.startswith("ASSM_GRP_CD"))
+        key_cols.extend(grp_cols)
+
+        if not key_cols:
+            return {}
+
+        # 키 컬럼을 str로 변환 (1회만)
+        str_keys = df[key_cols].astype(str)
+        indexed = {}
+        for idx, row in str_keys.iterrows():
+            k = tuple(row.values)
+            if k not in indexed:
+                indexed[k] = []
+            indexed[k].append(idx)
+        # 인덱스 리스트 → sub-DataFrame
+        result = {}
+        for k, idxs in indexed.items():
+            result[k] = df.loc[idxs]
+        result["__key_cols__"] = key_cols
+        return result
+
+    @staticmethod
+    def _lookup_indexed(indexed, resolved):
+        """사전 인덱싱된 dict에서 resolved 기반으로 O(1) 조회."""
+        if not indexed:
+            return pd.DataFrame()
+        key_cols = indexed.get("__key_cols__", [])
+        key_vals = []
+        for col in key_cols:
+            if col == "ASSM_FILE_ID":
+                key_vals.append(str(resolved["file_id"]))
+            elif col == "PROD_GRP_CD":
+                key_vals.append(str(resolved["prod_grp"]))
+            else:
+                # ASSM_GRP_CDn
+                key_vals.append(str(resolved["grp_filters"].get(col, "^")))
+        return indexed.get(tuple(key_vals), pd.DataFrame())
+
     def _filter_df_by_where(self, df, resolved):
-        """resolved dict 기반으로 DataFrame을 인메모리 필터링."""
+        """resolved dict 기반으로 DataFrame을 인메모리 필터링 (fallback)."""
         mask = pd.Series(True, index=df.index)
         if "ASSM_FILE_ID" in df.columns:
             mask &= df["ASSM_FILE_ID"].astype(str) == str(resolved["file_id"])
@@ -477,20 +545,10 @@ class RawAssumptionLoader:
                 rates[rsk_cd] = self._data_cache[cache_key]
                 continue
 
-            # 프리로드 모드: 인메모리 필터링
+            # 프리로드 모드: 사전 인덱싱 조회 (O(1))
             if self._mort_preload is not None:
-                all_rows = self._mort_preload.get(rsk_cd, [])
-                filtered = []
-                for row in all_rows:
-                    match = True
-                    for pos_idx in range(10):
-                        if div_vals_list[pos_idx] != "":
-                            db_val = str(row[3 + pos_idx]) if row[3 + pos_idx] is not None else ""
-                            if db_val != div_vals_list[pos_idx]:
-                                match = False
-                                break
-                    if match:
-                        filtered.append((int(row[1]), float(row[2])))  # (age, rate)
+                div_key = tuple(div_vals_list)
+                filtered = self._mort_indexed.get((rsk_cd, div_key), [])
 
                 if not filtered:
                     rates[rsk_cd] = np.zeros(1, dtype=np.float64)
@@ -678,8 +736,10 @@ class RawAssumptionLoader:
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
 
-        # 프리로드 모드: 인메모리 필터링
-        if isinstance(self._lapse_preload, pd.DataFrame) and not self._lapse_preload.empty:
+        # 프리로드 모드: 사전 인덱싱 조회
+        if self._lapse_indexed:
+            df = self._lookup_indexed(self._lapse_indexed, resolved)
+        elif isinstance(self._lapse_preload, pd.DataFrame) and not self._lapse_preload.empty:
             df = self._filter_df_by_where(self._lapse_preload, resolved)
         else:
             df = self.conn.execute(f"""
@@ -735,8 +795,10 @@ class RawAssumptionLoader:
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
 
-        # 프리로드 모드: 인메모리 필터링
-        if isinstance(self._skew_preload, pd.DataFrame) and not self._skew_preload.empty:
+        # 프리로드 모드: 사전 인덱싱 조회
+        if self._skew_indexed:
+            df = self._lookup_indexed(self._skew_indexed, resolved)
+        elif isinstance(self._skew_preload, pd.DataFrame) and not self._skew_preload.empty:
             df = self._filter_df_by_where(self._skew_preload, resolved)
         else:
             df = self.conn.execute(f"""
@@ -796,8 +858,10 @@ class RawAssumptionLoader:
                 continue
 
             try:
-                # 프리로드 모드: 인메모리 필터링
-                if isinstance(self._beprd_preload, pd.DataFrame) and not self._beprd_preload.empty:
+                # 프리로드 모드: 사전 인덱싱 조회
+                if self._beprd_indexed:
+                    sub = self._lookup_indexed(self._beprd_indexed, resolved)
+                elif isinstance(self._beprd_preload, pd.DataFrame) and not self._beprd_preload.empty:
                     sub = self._filter_df_by_where(self._beprd_preload, resolved)
                     if "RSK_CAT_VAL" in sub.columns:
                         df = sub[sub["RSK_CAT_VAL"].astype(str) == str(rsk_cat_val)]
