@@ -187,6 +187,24 @@ class RawAssumptionLoader:
               f"LAPSE={len(self._lapse_preload):,}건 "
               f"BEPRD={len(self._beprd_preload):,}건 "
               f"SKEW={len(self._skew_preload):,}건")
+        # 히트율 추적 카운터
+        self._preload_stats = {
+            "mort_hit": 0, "mort_miss": 0,
+            "lapse_hit": 0, "lapse_miss": 0,
+            "beprd_hit": 0, "beprd_miss": 0,
+            "skew_hit": 0, "skew_miss": 0,
+        }
+
+    def print_preload_stats(self):
+        """프리로드 히트율 출력."""
+        if not hasattr(self, '_preload_stats'):
+            return
+        s = self._preload_stats
+        for name in ["mort", "lapse", "beprd", "skew"]:
+            h, m = s[f"{name}_hit"], s[f"{name}_miss"]
+            total = h + m
+            pct = h / total * 100 if total > 0 else 0
+            print(f"    {name}: {h:,}/{total:,} ({pct:.1f}% hit)")
 
     def _preload_mortality(self):
         """IR_RSKRT_VAL 전건 → _mort_preload.
@@ -482,8 +500,12 @@ class RawAssumptionLoader:
                 arr = self._mort_preload.get((rsk_cd, div_key))
                 if arr is not None:
                     rates[rsk_cd] = arr[:1] if risk.chr_cd == "S" else arr
+                    if hasattr(self, '_preload_stats'):
+                        self._preload_stats["mort_hit"] += 1
                 else:
                     rates[rsk_cd] = np.zeros(1, dtype=np.float64)
+                    if hasattr(self, '_preload_stats'):
+                        self._preload_stats["mort_miss"] += 1
                 continue
 
             # SQL 모드: 기존 캐시 + DB 조회
@@ -678,7 +700,11 @@ class RawAssumptionLoader:
             fkey = self._resolved_to_filter_key(resolved, self._lapse_filter_cols)
             result = self._lapse_preload.get(fkey)
             if result is not None:
+                if hasattr(self, '_preload_stats'):
+                    self._preload_stats["lapse_hit"] += 1
                 return result
+            if hasattr(self, '_preload_stats'):
+                self._preload_stats["lapse_miss"] += 1
             return np.zeros(max_years), np.zeros(max_years)
 
         where = self._build_where(resolved)
@@ -739,7 +765,11 @@ class RawAssumptionLoader:
             fkey = self._resolved_to_filter_key(resolved, self._skew_filter_cols)
             result = self._skew_preload.get(fkey)
             if result is not None:
+                if hasattr(self, '_preload_stats'):
+                    self._preload_stats["skew_hit"] += 1
                 return result
+            if hasattr(self, '_preload_stats'):
+                self._preload_stats["skew_miss"] += 1
             return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
 
         where = self._build_where(resolved)
@@ -796,7 +826,14 @@ class RawAssumptionLoader:
                     result[risk_cd] = np.ones(max_years, dtype=np.float64)
                 else:
                     arr = self._beprd_preload.get((fkey, str(rsk_cat_val)))
-                    result[risk_cd] = arr if arr is not None else np.ones(max_years, dtype=np.float64)
+                    if arr is not None:
+                        result[risk_cd] = arr
+                        if hasattr(self, '_preload_stats'):
+                            self._preload_stats["beprd_hit"] += 1
+                    else:
+                        result[risk_cd] = np.ones(max_years, dtype=np.float64)
+                        if hasattr(self, '_preload_stats'):
+                            self._preload_stats["beprd_miss"] += 1
             return result
 
         result = {}
