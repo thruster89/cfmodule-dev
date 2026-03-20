@@ -92,10 +92,10 @@ class RawAssumptionLoader:
         self._contract_cache = {} # idno -> ContractInfo
         self._cov_def_cd_map = {} # (prod, cls, cov) -> {def_cd_value: rsk_div_index}
         # 배치 프리로드 (preload_data_tables() 호출 시 채워짐)
-        self._mort_preload = None    # {(rsk_cd, div_val_tuple): rate_array}
-        self._lapse_preload = None   # {filter_tuple: (paying, paidup)}
-        self._beprd_preload = None   # {(filter_tuple, rsk_cat_val): beprd_array}
-        self._skew_preload = None    # {filter_tuple: skew_array}
+        self._mort_preload = None    # {rsk_cd: [(row_tuple), ...]}
+        self._lapse_preload = None   # DataFrame or None
+        self._beprd_preload = None   # DataFrame or None
+        self._skew_preload = None    # DataFrame or None
         self._preload_driver_tables()
         self._preload_cov_def_cd()
 
@@ -166,199 +166,62 @@ class RawAssumptionLoader:
     # 배치 전건 프리로드 (mn_chain DB I/O 제거)
     # ------------------------------------------------------------------
     def preload_data_tables(self):
-        """배치 실행 시 3대 데이터 테이블을 메모리에 일괄 로드.
+        """배치 실행 시 데이터 테이블을 메모리에 일괄 로드.
 
-        이후 load_mortality_rates/load_lapse_rates/load_beprd/load_skew에서
-        SQL 대신 인메모리 lookup으로 대체.
+        원시 데이터를 메모리에 올린 후, load_* 함수에서 SQL 대신
+        인메모리 필터링 → _data_cache 자동 캐시.
+
+        전략: 키 매칭이 아니라 원시 데이터 보관 + 인메모리 필터.
         """
         import time
         t0 = time.time()
-        self._preload_mortality()
-        t1 = time.time()
-        self._preload_lapse()
-        t2 = time.time()
-        self._preload_beprd()
-        t3 = time.time()
-        self._preload_skew()
-        t4 = time.time()
-        print(f"  데이터 프리로드: MORT={t1-t0:.1f}s LAPSE={t2-t1:.1f}s "
-              f"BEPRD={t3-t2:.1f}s SKEW={t4-t3:.1f}s (합계 {t4-t0:.1f}s)")
-        print(f"    MORT={len(self._mort_preload):,}건 "
-              f"LAPSE={len(self._lapse_preload):,}건 "
-              f"BEPRD={len(self._beprd_preload):,}건 "
-              f"SKEW={len(self._skew_preload):,}건")
-        # 히트율 추적 카운터
-        self._preload_stats = {
-            "mort_hit": 0, "mort_miss": 0,
-            "lapse_hit": 0, "lapse_miss": 0,
-            "beprd_hit": 0, "beprd_miss": 0,
-            "skew_hit": 0, "skew_miss": 0,
-        }
 
-    def print_preload_stats(self):
-        """프리로드 히트율 출력."""
-        if not hasattr(self, '_preload_stats'):
-            return
-        s = self._preload_stats
-        for name in ["mort", "lapse", "beprd", "skew"]:
-            h, m = s[f"{name}_hit"], s[f"{name}_miss"]
-            total = h + m
-            pct = h / total * 100 if total > 0 else 0
-            print(f"    {name}: {h:,}/{total:,} ({pct:.1f}% hit)")
-
-    def _preload_mortality(self):
-        """IR_RSKRT_VAL 전건 → _mort_preload.
-
-        키: (rsk_cd, (div_val1, div_val2, ..., div_val10))
-        값: rate_by_age (numpy array, 인덱스=나이)
-        """
-        div_cols = [f"RSK_RT_DIV_VAL{i}" for i in range(1, 11)]
-        df = self.conn.execute(f"""
-            SELECT RSK_RT_CD, AGE, RSK_RT, {', '.join(div_cols)}
+        # IR_RSKRT_VAL: RSK_RT_CD별로 그룹화
+        rows = self.conn.execute(f"""
+            SELECT RSK_RT_CD, AGE, RSK_RT,
+                   RSK_RT_DIV_VAL1, RSK_RT_DIV_VAL2, RSK_RT_DIV_VAL3,
+                   RSK_RT_DIV_VAL4, RSK_RT_DIV_VAL5, RSK_RT_DIV_VAL6,
+                   RSK_RT_DIV_VAL7, RSK_RT_DIV_VAL8, RSK_RT_DIV_VAL9,
+                   RSK_RT_DIV_VAL10
             FROM {self.p}IR_RSKRT_VAL
-        """).fetchdf()
+        """).fetchall()
+        self._mort_preload = {}  # {rsk_cd: [(age, rate, dv1..dv10), ...]}
+        for r in rows:
+            self._mort_preload.setdefault(str(r[0]), []).append(r)
+        t1 = time.time()
 
-        self._mort_preload = {}
-        if df.empty:
-            return
+        # IA_T_TRMNAT_RT: 전건 DataFrame
+        self._lapse_preload = self.conn.execute(
+            f"SELECT * FROM {self.p}IA_T_TRMNAT_RT").fetchdf()
+        t2 = time.time()
 
-        # 그룹화: (RSK_RT_CD, DIV_VAL1..10) → ages/rates
-        group_cols = ["RSK_RT_CD"] + div_cols
-        for key_vals, sub in df.groupby(group_cols, sort=False):
-            rsk_cd = str(key_vals[0])
-            div_vals = tuple(str(v) if pd.notna(v) else "" for v in key_vals[1:])
+        # IA_R_BEPRD_DEFRY_RT: 전건 DataFrame
+        self._beprd_preload = self.conn.execute(
+            f"SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT").fetchdf()
+        t3 = time.time()
 
-            ages = sub["AGE"].values.astype(int)
-            vals = sub["RSK_RT"].values.astype(np.float64)
+        # IA_T_SKEW: 전건 DataFrame
+        self._skew_preload = self.conn.execute(
+            f"SELECT * FROM {self.p}IA_T_SKEW").fetchdf()
+        t4 = time.time()
 
-            if len(ages) == 0:
-                continue
-            max_age = int(ages.max())
-            arr = np.zeros(max_age + 1, dtype=np.float64)
-            arr[ages] = vals
-            self._mort_preload[(rsk_cd, div_vals)] = arr
+        print(f"  데이터 프리로드: MORT={t1-t0:.1f}s({len(rows):,}행) "
+              f"LAPSE={t2-t1:.1f}s({len(self._lapse_preload):,}행) "
+              f"BEPRD={t3-t2:.1f}s({len(self._beprd_preload):,}행) "
+              f"SKEW={t4-t3:.1f}s({len(self._skew_preload):,}행) "
+              f"합계={t4-t0:.1f}s")
 
-    def _preload_lapse(self):
-        """IA_T_TRMNAT_RT 전건 → _lapse_preload.
-
-        키: 행의 필터 컬럼 tuple
-        값: (paying_array, paidup_array)
-        """
-        df = self.conn.execute(f"""
-            SELECT * FROM {self.p}IA_T_TRMNAT_RT
-        """).fetchdf()
-
-        self._lapse_preload = {}
-        if df.empty:
-            return
-
-        # 필터 컬럼 = ASSM_FILE_ID, PROD_GRP_CD, ASSM_GRP_CD*
-        filter_cols = [c for c in df.columns
-                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
-        val_cols = sorted(
-            [c for c in df.columns if c.startswith("TRMNAT_RT") and c[9:].isdigit()],
-            key=lambda x: int(x[9:])
-        )
-        max_years = 100
-
-        # (filter_tuple) → {pay_dvcd: rate_array}
-        temp = {}
-        for _, row in df.iterrows():
-            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
-            pay_dvcd = int(row.get("PAY_DVCD", 1))
-            rates = np.zeros(max_years, dtype=np.float64)
-            for yr_idx, col in enumerate(val_cols):
-                if yr_idx < max_years:
-                    v = float(row[col]) if pd.notna(row[col]) else 0.0
-                    rates[yr_idx] = v
-            n_data = len(val_cols)
-            if n_data < max_years:
-                rates[n_data:] = rates[n_data - 1]
-            temp.setdefault(fkey, {})[pay_dvcd] = rates
-
-        for fkey, dvcd_map in temp.items():
-            paying = dvcd_map.get(1, np.zeros(max_years, dtype=np.float64))
-            paidup = dvcd_map.get(2, np.zeros(max_years, dtype=np.float64))
-            self._lapse_preload[fkey] = (paying, paidup)
-
-        # _lapse_filter_cols 저장 (lookup 시 사용)
-        self._lapse_filter_cols = filter_cols
-
-    def _preload_beprd(self):
-        """IA_R_BEPRD_DEFRY_RT 전건 → _beprd_preload.
-
-        키: (filter_tuple, rsk_cat_val)
-        값: beprd_array
-        """
-        df = self.conn.execute(f"""
-            SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT
-        """).fetchdf()
-
-        self._beprd_preload = {}
-        if df.empty:
-            return
-
-        filter_cols = [c for c in df.columns
-                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
-        val_cols = sorted(
-            [c for c in df.columns if c.startswith("BEPRD_DEFRY_RT")],
-            key=lambda x: int(x.replace("BEPRD_DEFRY_RT", ""))
-        )
-        max_years = 100
-
-        for _, row in df.iterrows():
-            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
-            rsk_cat_val = str(row.get("RSK_CAT_VAL", "")) if pd.notna(row.get("RSK_CAT_VAL")) else ""
-
-            beprd = np.ones(max_years, dtype=np.float64)
-            for yr_idx, col in enumerate(val_cols):
-                if yr_idx < max_years:
-                    v = float(row[col]) if pd.notna(row[col]) else 1.0
-                    beprd[yr_idx] = v
-            # 마지막 유효값 연장
-            last_valid = 0
-            for i in range(max_years):
-                if beprd[i] != 1.0:
-                    last_valid = i
-            if last_valid > 0 and last_valid < max_years - 1:
-                beprd[last_valid + 1:] = beprd[last_valid]
-
-            self._beprd_preload[(fkey, rsk_cat_val)] = beprd
-
-        self._beprd_filter_cols = filter_cols
-
-    def _preload_skew(self):
-        """IA_T_SKEW 전건 → _skew_preload.
-
-        키: filter_tuple
-        값: skew_array (max_months)
-        """
-        df = self.conn.execute(f"""
-            SELECT * FROM {self.p}IA_T_SKEW
-        """).fetchdf()
-
-        self._skew_preload = {}
-        if df.empty:
-            return
-
-        filter_cols = [c for c in df.columns
-                       if c in ("ASSM_FILE_ID", "PROD_GRP_CD") or c.startswith("ASSM_GRP_CD")]
-        max_months = 1200
-
-        for _, row in df.iterrows():
-            fkey = tuple(str(row[c]) if pd.notna(row[c]) else "" for c in filter_cols)
-            skew = np.full(max_months, 1.0 / 12.0, dtype=np.float64)
-            for mi in range(36):
-                col = f"SKEW{mi + 1}"
-                if col in df.columns:
-                    v = float(row[col]) if pd.notna(row[col]) else 1.0 / 12.0
-                    skew[mi] = v
-            # 37개월 이후 = 마지막 값 유지
-            if len(df.columns) > 0:
-                skew[36:] = skew[35]
-            self._skew_preload[fkey] = skew
-
-        self._skew_filter_cols = filter_cols
+    def _filter_df_by_where(self, df, resolved):
+        """resolved dict 기반으로 DataFrame을 인메모리 필터링."""
+        mask = pd.Series(True, index=df.index)
+        if "ASSM_FILE_ID" in df.columns:
+            mask &= df["ASSM_FILE_ID"].astype(str) == str(resolved["file_id"])
+        if "PROD_GRP_CD" in df.columns:
+            mask &= df["PROD_GRP_CD"].astype(str) == str(resolved["prod_grp"])
+        for col, val in resolved["grp_filters"].items():
+            if col in df.columns:
+                mask &= df[col].astype(str) == str(val)
+        return df[mask]
 
     def _row_to_contract(self, row) -> ContractInfo:
         main_pterm = int(row[11]) if row[11] is not None else int(row[6])
@@ -494,27 +357,44 @@ class RawAssumptionLoader:
                         f"RSK_RT_DIV_VAL{pos_idx + 1} = '{ctr_val}'"
                     )
 
-            # 프리로드 모드: dict lookup
-            if self._mort_preload is not None:
-                div_key = tuple(div_vals_list)
-                arr = self._mort_preload.get((rsk_cd, div_key))
-                if arr is not None:
-                    rates[rsk_cd] = arr[:1] if risk.chr_cd == "S" else arr
-                    if hasattr(self, '_preload_stats'):
-                        self._preload_stats["mort_hit"] += 1
-                else:
-                    rates[rsk_cd] = np.zeros(1, dtype=np.float64)
-                    if hasattr(self, '_preload_stats'):
-                        self._preload_stats["mort_miss"] += 1
-                continue
-
-            # SQL 모드: 기존 캐시 + DB 조회
             div_where = " AND " + " AND ".join(div_filters) if div_filters else ""
             cache_key = ("MORT", rsk_cd, div_where)
             if cache_key in self._data_cache:
                 rates[rsk_cd] = self._data_cache[cache_key]
                 continue
 
+            # 프리로드 모드: 인메모리 필터링
+            if self._mort_preload is not None:
+                all_rows = self._mort_preload.get(rsk_cd, [])
+                filtered = []
+                for row in all_rows:
+                    match = True
+                    for pos_idx in range(10):
+                        if div_vals_list[pos_idx] != "":
+                            db_val = str(row[3 + pos_idx]) if row[3 + pos_idx] is not None else ""
+                            if db_val != div_vals_list[pos_idx]:
+                                match = False
+                                break
+                    if match:
+                        filtered.append((int(row[1]), float(row[2])))  # (age, rate)
+
+                if not filtered:
+                    rates[rsk_cd] = np.zeros(1, dtype=np.float64)
+                elif risk.chr_cd == "S":
+                    rates[rsk_cd] = np.array([filtered[0][1]], dtype=np.float64)
+                else:
+                    ages_f = [a for a, _ in filtered]
+                    vals_f = [v for _, v in filtered]
+                    max_age = max(ages_f)
+                    arr = np.zeros(max_age + 1, dtype=np.float64)
+                    for a, v in zip(ages_f, vals_f):
+                        arr[a] = v
+                    rates[rsk_cd] = arr
+
+                self._data_cache[cache_key] = rates[rsk_cd]
+                continue
+
+            # SQL 모드
             df = self.conn.execute(f"""
                 SELECT AGE, RSK_RT
                 FROM {self.p}IR_RSKRT_VAL
@@ -663,22 +543,6 @@ class RawAssumptionLoader:
             parts.append(f"{col} = '{val}'")
         return " AND ".join(parts)
 
-    def _resolved_to_filter_key(self, resolved: dict, filter_cols: list) -> tuple:
-        """resolved dict → 프리로드 키 변환.
-
-        프리로드 시 filter_cols 순서로 행의 값을 tuple로 만들었으므로,
-        같은 순서로 resolved의 값을 추출한다.
-        """
-        vals = []
-        for col in filter_cols:
-            if col == "ASSM_FILE_ID":
-                vals.append(str(resolved["file_id"]))
-            elif col == "PROD_GRP_CD":
-                vals.append(str(resolved["prod_grp"]))
-            else:
-                vals.append(str(resolved["grp_filters"].get(col, "")))
-        return tuple(vals)
-
     # ------------------------------------------------------------------
     # 해지율 (IA_T_TRMNAT_RT)
     # ------------------------------------------------------------------
@@ -695,26 +559,18 @@ class RawAssumptionLoader:
         if resolved is None:
             return np.zeros(max_years), np.zeros(max_years)
 
-        # 프리로드 모드
-        if self._lapse_preload is not None:
-            fkey = self._resolved_to_filter_key(resolved, self._lapse_filter_cols)
-            result = self._lapse_preload.get(fkey)
-            if result is not None:
-                if hasattr(self, '_preload_stats'):
-                    self._preload_stats["lapse_hit"] += 1
-                return result
-            if hasattr(self, '_preload_stats'):
-                self._preload_stats["lapse_miss"] += 1
-            return np.zeros(max_years), np.zeros(max_years)
-
         where = self._build_where(resolved)
         cache_key = ("TRMNAT", where)
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
 
-        df = self.conn.execute(f"""
-            SELECT * FROM {self.p}IA_T_TRMNAT_RT WHERE {where}
-        """).fetchdf()
+        # 프리로드 모드: 인메모리 필터링
+        if isinstance(self._lapse_preload, pd.DataFrame) and not self._lapse_preload.empty:
+            df = self._filter_df_by_where(self._lapse_preload, resolved)
+        else:
+            df = self.conn.execute(f"""
+                SELECT * FROM {self.p}IA_T_TRMNAT_RT WHERE {where}
+            """).fetchdf()
 
         if df.empty:
             self._data_cache[cache_key] = (np.zeros(max_years), np.zeros(max_years))
@@ -760,26 +616,18 @@ class RawAssumptionLoader:
         if resolved is None:
             return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
 
-        # 프리로드 모드
-        if self._skew_preload is not None:
-            fkey = self._resolved_to_filter_key(resolved, self._skew_filter_cols)
-            result = self._skew_preload.get(fkey)
-            if result is not None:
-                if hasattr(self, '_preload_stats'):
-                    self._preload_stats["skew_hit"] += 1
-                return result
-            if hasattr(self, '_preload_stats'):
-                self._preload_stats["skew_miss"] += 1
-            return np.full(max_months, 1.0 / 12.0, dtype=np.float64)
-
         where = self._build_where(resolved)
         cache_key = ("SKEW", where)
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
 
-        df = self.conn.execute(f"""
-            SELECT * FROM {self.p}IA_T_SKEW WHERE {where}
-        """).fetchdf()
+        # 프리로드 모드: 인메모리 필터링
+        if isinstance(self._skew_preload, pd.DataFrame) and not self._skew_preload.empty:
+            df = self._filter_df_by_where(self._skew_preload, resolved)
+        else:
+            df = self.conn.execute(f"""
+                SELECT * FROM {self.p}IA_T_SKEW WHERE {where}
+            """).fetchdf()
 
         if df.empty:
             result = np.full(max_months, 1.0 / 12.0, dtype=np.float64)
@@ -816,26 +664,6 @@ class RawAssumptionLoader:
         if resolved is None:
             return {rsk: np.ones(max_years) for rsk in risk_cds}
 
-        # 프리로드 모드
-        if self._beprd_preload is not None:
-            fkey = self._resolved_to_filter_key(resolved, self._beprd_filter_cols)
-            result = {}
-            for risk_cd in risk_cds:
-                rsk_cat_val = self._rsk_cat_cache.get((9, resolved["file_id"], risk_cd))
-                if rsk_cat_val is None:
-                    result[risk_cd] = np.ones(max_years, dtype=np.float64)
-                else:
-                    arr = self._beprd_preload.get((fkey, str(rsk_cat_val)))
-                    if arr is not None:
-                        result[risk_cd] = arr
-                        if hasattr(self, '_preload_stats'):
-                            self._preload_stats["beprd_hit"] += 1
-                    else:
-                        result[risk_cd] = np.ones(max_years, dtype=np.float64)
-                        if hasattr(self, '_preload_stats'):
-                            self._preload_stats["beprd_miss"] += 1
-            return result
-
         result = {}
         for risk_cd in risk_cds:
             # RSK_CAT_VAL 매핑 (인메모리)
@@ -854,9 +682,17 @@ class RawAssumptionLoader:
                 continue
 
             try:
-                df = self.conn.execute(f"""
-                    SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT WHERE {where_sql}
-                """).fetchdf()
+                # 프리로드 모드: 인메모리 필터링
+                if isinstance(self._beprd_preload, pd.DataFrame) and not self._beprd_preload.empty:
+                    sub = self._filter_df_by_where(self._beprd_preload, resolved)
+                    if "RSK_CAT_VAL" in sub.columns:
+                        df = sub[sub["RSK_CAT_VAL"].astype(str) == str(rsk_cat_val)]
+                    else:
+                        df = sub
+                else:
+                    df = self.conn.execute(f"""
+                        SELECT * FROM {self.p}IA_R_BEPRD_DEFRY_RT WHERE {where_sql}
+                    """).fetchdf()
             except Exception:
                 result[risk_cd] = np.ones(max_years, dtype=np.float64)
                 continue
