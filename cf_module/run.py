@@ -92,8 +92,12 @@ def compute_n_steps(ctr: ContractInfo) -> int:
 # STEP 1~3: RSK_RT → LAPSE_RT → TBL_MN
 # ---------------------------------------------------------------------------
 
-def _compute_mn_chain(loader, ctr, n_steps, mn_timings=None):
-    """RSK_RT → LAPSE_RT → TBL_MN."""
+def _compute_mn_chain(loader, ctr, n_steps, mn_timings=None, fast=False):
+    """RSK_RT → LAPSE_RT → TBL_MN.
+
+    Args:
+        fast: True이면 RSK_RT에서 AF 배열만 반환 (배치 최적화)
+    """
     import time as _t
     _t0 = _t.time()
     risks = loader.load_risk_codes(ctr)
@@ -109,7 +113,7 @@ def _compute_mn_chain(loader, ctr, n_steps, mn_timings=None):
     invld = loader.load_invld_months(ctr)
     _t2 = _t.time()
 
-    rsk_rt = compute_rsk_rt(ctr, all_risks, mortality, beprd, invld, n_steps)
+    rsk_rt = compute_rsk_rt(ctr, all_risks, mortality, beprd, invld, n_steps, fast=fast)
     _t3 = _t.time()
 
     lapse_paying, lapse_paidup = loader.load_lapse_rates(ctr)

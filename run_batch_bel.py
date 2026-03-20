@@ -120,7 +120,7 @@ def _compute_one(ctx: PipelineContext, idno: int, timings=None):
     if ctx.mn_cache is not None and idno in ctx.mn_cache:
         rsk_rt, lapse_rt, tbl_mn = ctx.mn_cache[idno]
     else:
-        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(ctx.loader, ctr, n_steps, mn_timings=timings)
+        rsk_rt, lapse_rt, tbl_mn = _compute_mn_chain(ctx.loader, ctr, n_steps, mn_timings=timings, fast=True)
         if ctx.mn_cache is not None:
             ctx.mn_cache[idno] = (rsk_rt, lapse_rt, tbl_mn)
     t2 = time.time()
