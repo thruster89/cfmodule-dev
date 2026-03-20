@@ -169,8 +169,13 @@ class RawAssumptionLoader:
     # ------------------------------------------------------------------
     # 배치 전건 프리로드 (mn_chain DB I/O 제거)
     # ------------------------------------------------------------------
-    def preload_data_tables(self):
-        """배치 실행 시 데이터 테이블을 메모리에 일괄 로드."""
+    def preload_data_tables(self, include_mort=True):
+        """배치 실행 시 데이터 테이블을 메모리에 일괄 로드.
+
+        Args:
+            include_mort: False이면 IR_RSKRT_VAL(89만행) 로드 건너뜀.
+                         멀티프로세스 시 메모리 절약을 위해 False 사용.
+        """
         import sys
         import time
         t0 = time.time()
@@ -260,21 +265,25 @@ class RawAssumptionLoader:
         t_chr = time.time()
         print(f" {len(rows):,}행 {t_chr-t_bnft:.1f}s", flush=True)
 
-        # ── 기존: IR_RSKRT_VAL ──
-        print("    MORT (IR_RSKRT_VAL) 로드 중...", end="", flush=True)
-        rows = self.conn.execute(f"""
-            SELECT RSK_RT_CD, AGE, RSK_RT,
-                   RSK_RT_DIV_VAL1, RSK_RT_DIV_VAL2, RSK_RT_DIV_VAL3,
-                   RSK_RT_DIV_VAL4, RSK_RT_DIV_VAL5, RSK_RT_DIV_VAL6,
-                   RSK_RT_DIV_VAL7, RSK_RT_DIV_VAL8, RSK_RT_DIV_VAL9,
-                   RSK_RT_DIV_VAL10
-            FROM {self.p}IR_RSKRT_VAL
-        """).fetchall()
-        self._mort_preload = {}
-        for r in rows:
-            self._mort_preload.setdefault(str(r[0]), []).append(r)
-        t1 = time.time()
-        print(f" {len(rows):,}행 {t1-t0:.1f}s", flush=True)
+        # ── IR_RSKRT_VAL (89만행, 선택적) ──
+        if include_mort:
+            print("    MORT (IR_RSKRT_VAL) 로드 중...", end="", flush=True)
+            rows = self.conn.execute(f"""
+                SELECT RSK_RT_CD, AGE, RSK_RT,
+                       RSK_RT_DIV_VAL1, RSK_RT_DIV_VAL2, RSK_RT_DIV_VAL3,
+                       RSK_RT_DIV_VAL4, RSK_RT_DIV_VAL5, RSK_RT_DIV_VAL6,
+                       RSK_RT_DIV_VAL7, RSK_RT_DIV_VAL8, RSK_RT_DIV_VAL9,
+                       RSK_RT_DIV_VAL10
+                FROM {self.p}IR_RSKRT_VAL
+            """).fetchall()
+            self._mort_preload = {}
+            for r in rows:
+                self._mort_preload.setdefault(str(r[0]), []).append(r)
+            t1 = time.time()
+            print(f" {len(rows):,}행 {t1-t_chr:.1f}s", flush=True)
+        else:
+            print("    MORT (IR_RSKRT_VAL) 건너뜀 (멀티프로세스 모드)", flush=True)
+            t1 = t_chr
 
         # IA_T_TRMNAT_RT: 전건 DataFrame
         print("    LAPSE (IA_T_TRMNAT_RT) 로드 중...", end="", flush=True)
@@ -299,10 +308,12 @@ class RawAssumptionLoader:
 
         print(f"  데이터 프리로드 합계: {t4-t0:.1f}s", flush=True)
 
-        print(f"  데이터 프리로드: MORT={t1-t0:.1f}s({len(rows):,}행) "
+        mort_info = f"MORT={t1-t_chr:.1f}s" if include_mort else "MORT=skip"
+        print(f"  데이터 프리로드: RISK={t_risk-t0:.1f}s "
+              f"COV={t_cov-t_risk:.1f}s BNFT={t_bnft-t_cov:.1f}s "
+              f"CHR={t_chr-t_bnft:.1f}s {mort_info} "
               f"LAPSE={t2-t1:.1f}s({len(self._lapse_preload):,}행) "
-              f"BEPRD={t3-t2:.1f}s({len(self._beprd_preload):,}행) "
-              f"SKEW={t4-t3:.1f}s({len(self._skew_preload):,}행) "
+              f"BEPRD={t3-t2:.1f}s SKEW={t4-t3:.1f}s "
               f"합계={t4-t0:.1f}s")
 
     def _filter_df_by_where(self, df, resolved):
